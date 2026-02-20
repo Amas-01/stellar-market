@@ -63,3 +63,12 @@ export interface Review {
   reviewer: User;
   createdAt: string;
 }
+
+export interface UserProfile extends User {
+  reviewsReceived: Review[];
+  clientJobs: Job[];
+  freelancerJobs: Job[];
+  averageRating: number;
+  reviewCount: number;
+  createdAt: string;
+}
