@@ -1,4 +1,4 @@
-import { CheckCircle, Clock, DollarSign, User, ArrowLeft } from "lucide-react";
+import { Clock, DollarSign, ArrowLeft } from "lucide-react";
 import Link from "next/link";
 import StatusBadge from "@/components/StatusBadge";
 
@@ -36,9 +36,36 @@ We expect this project to be completed within 6-8 weeks.`,
     role: "CLIENT" as const,
   },
   milestones: [
-    { id: "m1", jobId: "1", title: "UI Design & Architecture", description: "Create wireframes, component architecture, and set up the project with Next.js, Tailwind, and Stellar SDK integration.", amount: 1000, status: "PENDING" as const, order: 0 },
-    { id: "m2", jobId: "1", title: "Core Swap & Pool Interface", description: "Build the token swap interface, liquidity pool management, and integrate with Soroban smart contracts.", amount: 2500, status: "PENDING" as const, order: 1 },
-    { id: "m3", jobId: "1", title: "Dashboard, Testing & Deployment", description: "Build portfolio dashboard, transaction history, write tests, and deploy to production.", amount: 1500, status: "PENDING" as const, order: 2 },
+    {
+      id: "m1",
+      jobId: "1",
+      title: "UI Design & Architecture",
+      description:
+        "Create wireframes, component architecture, and set up the project with Next.js, Tailwind, and Stellar SDK integration.",
+      amount: 1000,
+      status: "PENDING" as const,
+      order: 0,
+    },
+    {
+      id: "m2",
+      jobId: "1",
+      title: "Core Swap & Pool Interface",
+      description:
+        "Build the token swap interface, liquidity pool management, and integrate with Soroban smart contracts.",
+      amount: 2500,
+      status: "PENDING" as const,
+      order: 1,
+    },
+    {
+      id: "m3",
+      jobId: "1",
+      title: "Dashboard, Testing & Deployment",
+      description:
+        "Build portfolio dashboard, transaction history, write tests, and deploy to production.",
+      amount: 1500,
+      status: "PENDING" as const,
+      order: 2,
+    },
   ],
 };
 
@@ -151,7 +178,10 @@ export default function JobDetailPage() {
             </h3>
             <div className="space-y-2">
               {mockJob.milestones.map((m) => (
-                <div key={m.id} className="flex items-center justify-between text-sm">
+                <div
+                  key={m.id}
+                  className="flex items-center justify-between text-sm"
+                >
                   <span className="text-dark-text">{m.title}</span>
                   <span className="text-dark-heading font-medium">
                     {m.amount.toLocaleString()} XLM
