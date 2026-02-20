@@ -41,8 +41,9 @@ router.get("/", async (req: AuthRequest, res: Response) => {
 // Get a single job by ID
 router.get("/:id", async (req: AuthRequest, res: Response) => {
   try {
+    const jobId = req.params.id as string;
     const job = await prisma.job.findUnique({
-      where: { id: req.params.id },
+      where: { id: jobId },
       include: {
         client: { select: { id: true, username: true, avatarUrl: true, bio: true } },
         freelancer: { select: { id: true, username: true, avatarUrl: true, bio: true } },
@@ -108,7 +109,8 @@ router.post("/", authenticate, async (req: AuthRequest, res: Response) => {
 // Update a job
 router.put("/:id", authenticate, async (req: AuthRequest, res: Response) => {
   try {
-    const job = await prisma.job.findUnique({ where: { id: req.params.id } });
+    const jobId = req.params.id as string;
+    const job = await prisma.job.findUnique({ where: { id: jobId } });
 
     if (!job) {
       res.status(404).json({ error: "Job not found." });
@@ -122,7 +124,7 @@ router.put("/:id", authenticate, async (req: AuthRequest, res: Response) => {
     const { title, description, budget, category, status } = req.body;
 
     const updated = await prisma.job.update({
-      where: { id: req.params.id },
+      where: { id: jobId },
       data: {
         ...(title && { title }),
         ...(description && { description }),
@@ -143,7 +145,8 @@ router.put("/:id", authenticate, async (req: AuthRequest, res: Response) => {
 // Delete a job
 router.delete("/:id", authenticate, async (req: AuthRequest, res: Response) => {
   try {
-    const job = await prisma.job.findUnique({ where: { id: req.params.id } });
+    const jobId = req.params.id as string;
+    const job = await prisma.job.findUnique({ where: { id: jobId } });
 
     if (!job) {
       res.status(404).json({ error: "Job not found." });
@@ -154,7 +157,7 @@ router.delete("/:id", authenticate, async (req: AuthRequest, res: Response) => {
       return;
     }
 
-    await prisma.job.delete({ where: { id: req.params.id } });
+    await prisma.job.delete({ where: { id: jobId } });
     res.json({ message: "Job deleted successfully." });
   } catch (error) {
     console.error("Delete job error:", error);

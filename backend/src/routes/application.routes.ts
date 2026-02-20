@@ -8,7 +8,7 @@ const prisma = new PrismaClient();
 // Apply for a job
 router.post("/jobs/:jobId/apply", authenticate, async (req: AuthRequest, res: Response) => {
   try {
-    const { jobId } = req.params;
+    const jobId = req.params.jobId as string;
     const { coverLetter, proposedBudget } = req.body;
 
     const job = await prisma.job.findUnique({ where: { id: jobId } });
@@ -55,8 +55,9 @@ router.post("/jobs/:jobId/apply", authenticate, async (req: AuthRequest, res: Re
 // Get applications for a job
 router.get("/jobs/:jobId/applications", authenticate, async (req: AuthRequest, res: Response) => {
   try {
+    const jobId = req.params.jobId as string;
     const applications = await prisma.application.findMany({
-      where: { jobId: req.params.jobId },
+      where: { jobId },
       include: {
         freelancer: { select: { id: true, username: true, avatarUrl: true, bio: true } },
       },
@@ -73,6 +74,7 @@ router.get("/jobs/:jobId/applications", authenticate, async (req: AuthRequest, r
 // Update application status (accept/reject)
 router.put("/applications/:id/status", authenticate, async (req: AuthRequest, res: Response) => {
   try {
+    const applicationId = req.params.id as string;
     const { status } = req.body;
 
     if (!["ACCEPTED", "REJECTED"].includes(status)) {
@@ -81,7 +83,7 @@ router.put("/applications/:id/status", authenticate, async (req: AuthRequest, re
     }
 
     const application = await prisma.application.findUnique({
-      where: { id: req.params.id },
+      where: { id: applicationId },
       include: { job: true },
     });
 
@@ -95,7 +97,7 @@ router.put("/applications/:id/status", authenticate, async (req: AuthRequest, re
     }
 
     const updated = await prisma.application.update({
-      where: { id: req.params.id },
+      where: { id: applicationId },
       data: { status },
     });
 

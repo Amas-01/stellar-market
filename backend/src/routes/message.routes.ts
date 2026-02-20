@@ -38,11 +38,12 @@ router.post("/", authenticate, async (req: AuthRequest, res: Response) => {
 // Get conversation with a specific user
 router.get("/:userId", authenticate, async (req: AuthRequest, res: Response) => {
   try {
+    const otherUserId = req.params.userId as string;
     const messages = await prisma.message.findMany({
       where: {
         OR: [
-          { senderId: req.userId!, receiverId: req.params.userId },
-          { senderId: req.params.userId, receiverId: req.userId! },
+          { senderId: req.userId!, receiverId: otherUserId },
+          { senderId: otherUserId, receiverId: req.userId! },
         ],
       },
       include: {
@@ -54,7 +55,7 @@ router.get("/:userId", authenticate, async (req: AuthRequest, res: Response) => 
     // Mark messages as read
     await prisma.message.updateMany({
       where: {
-        senderId: req.params.userId,
+        senderId: otherUserId,
         receiverId: req.userId!,
         read: false,
       },
