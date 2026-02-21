@@ -3,52 +3,47 @@
 import { useEffect, useState } from "react";
 import { useParams } from "next/navigation";
 import axios from "axios";
-import ChatWindow, { ChatMessage } from "@/components/chat/ChatWindow";
+import ChatWindow from "@/components/chat/ChatWindow";
 import { ArrowLeft } from "lucide-react";
 import Link from "next/link";
+import { useAuth } from "@/context/AuthContext";
 
 const API = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:5000/api";
-const TOKEN_KEY = "stellarmarket_jwt";
-const USER_ID_KEY = "stellarmarket_userId";
 
 export default function ConversationPage() {
   const params = useParams();
+  const { token, user: currentUser } = useAuth();
   const partnerId = params?.conversationId as string;
 
-  const [messages, setMessages] = useState<ChatMessage[]>([]);
+  const [messages, setMessages] = useState<any[]>([]);
   const [partnerUsername, setPartnerUsername] = useState<string>("");
-  const [currentUserId, setCurrentUserId] = useState<string>("");
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
-    const token = localStorage.getItem(TOKEN_KEY);
-    const userId = localStorage.getItem(USER_ID_KEY) ?? "";
-    setCurrentUserId(userId);
-
     if (!token || !partnerId) {
-      setError("Missing auth or conversation ID.");
+      if (!token) setError("Please log in to view this conversation.");
       setLoading(false);
       return;
     }
 
     axios
-      .get<ChatMessage[]>(`${API}/messages/${partnerId}`, {
+      .get<any[]>(`${API}/messages/${partnerId}`, {
         headers: { Authorization: `Bearer ${token}` },
       })
       .then((res) => {
         setMessages(res.data);
         // Derive partner username from first message
         const first = res.data[0];
-        if (first) {
+        if (first && currentUser) {
           const partner =
-            first.sender.id === userId ? first.sender : first.sender;
-          setPartnerUsername(partner.username);
+            first.senderId === currentUser.id ? first.receiver : first.sender;
+          setPartnerUsername(partner?.username || "");
         }
       })
       .catch(() => setError("Failed to load conversation."))
       .finally(() => setLoading(false));
-  }, [partnerId]);
+  }, [partnerId, token, currentUser]);
 
   if (loading) {
     return (
@@ -78,7 +73,7 @@ export default function ConversationPage() {
 
       <div className="flex-1 bg-dark-card border border-dark-border rounded-xl overflow-hidden flex flex-col">
         <ChatWindow
-          currentUserId={currentUserId}
+          currentUserId={currentUser?.id || ""}
           partnerId={partnerId}
           partnerUsername={partnerUsername || partnerId}
           initialMessages={messages}

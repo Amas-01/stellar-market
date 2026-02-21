@@ -10,9 +10,9 @@ import {
   LayoutDashboard,
   PenLine,
   LogOut,
+  User as UserIcon,
   Loader2,
   Settings,
-  UserCircle,
 } from "lucide-react";
 import axios from "axios";
 import { useState, useRef, useEffect } from "react";
@@ -21,11 +21,10 @@ import { useSocket } from "@/context/SocketContext";
 import { useAuth } from "@/context/AuthContext";
 
 const API = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:5000/api";
-const TOKEN_KEY = "stellarmarket_jwt";
 
-function WalletButton({ className }: { className?: string }) {
-  const { address, isConnecting, error, connect, disconnect } = useWallet();
-  const { user, logout } = useAuth();
+function UserMenu({ className }: { className?: string }) {
+  const { address, connect, disconnect } = useWallet();
+  const { user, logout, isLoading } = useAuth();
   const [menuOpen, setMenuOpen] = useState(false);
   const menuRef = useRef<HTMLDivElement>(null);
 
@@ -39,61 +38,83 @@ function WalletButton({ className }: { className?: string }) {
     return () => document.removeEventListener("mousedown", handleClickOutside);
   }, []);
 
-  if (isConnecting) {
+  if (isLoading) {
     return (
-      <button
-        disabled
-        className={`btn-primary flex items-center gap-2 text-sm opacity-70 cursor-not-allowed ${className ?? ""}`}
-      >
-        <Loader2 size={16} className="animate-spin" />
-        Connecting...
-      </button>
+      <div
+        className={`h-10 w-32 bg-dark-border/50 animate-pulse rounded-lg ${className ?? ""}`}
+      />
     );
   }
 
-  if (address) {
+  if (user) {
     return (
       <div className="relative" ref={menuRef}>
         <button
           onClick={() => setMenuOpen(!menuOpen)}
-          className={`btn-primary flex items-center gap-2 text-sm ${className ?? ""}`}
+          className={`flex items-center gap-3 px-3 py-1.5 rounded-lg border border-dark-border hover:bg-dark-border/50 transition-colors ${className ?? ""}`}
         >
-          <Wallet size={16} />
-          {truncateAddress(address)}
+          <div className="w-8 h-8 rounded-full bg-gradient-to-br from-stellar-blue to-stellar-purple flex items-center justify-center text-white font-bold text-sm">
+            {user.avatarUrl ? (
+              <img
+                src={user.avatarUrl}
+                alt={user.username}
+                className="w-full h-full rounded-full object-cover"
+              />
+            ) : (
+              user.username.charAt(0).toUpperCase()
+            )}
+          </div>
+          <div className="text-left hidden lg:block">
+            <p className="text-sm font-medium text-dark-heading leading-tight">
+              {user.username}
+            </p>
+            <p className="text-xs text-dark-muted leading-tight">{user.role}</p>
+          </div>
         </button>
         {menuOpen && (
-          <div className="absolute right-0 mt-2 w-48 bg-dark-card border border-dark-border rounded-lg shadow-lg py-1 z-50">
-            <div className="px-4 py-2 text-xs text-dark-text border-b border-dark-border break-all">
-              {user?.username || address}
+          <div className="absolute right-0 mt-2 w-56 bg-dark-card border border-dark-border rounded-xl shadow-2xl py-2 z-50 animate-in fade-in slide-in-from-top-2">
+            <div className="px-4 py-3 border-b border-dark-border mb-1">
+              <p className="text-sm font-medium text-dark-heading">
+                {user.username}
+              </p>
+              <p className="text-xs text-dark-muted break-all">
+                {user.walletAddress}
+              </p>
             </div>
-            {user && (
-              <Link
-                href={`/profile/${user.id}`}
-                onClick={() => setMenuOpen(false)}
-                className="w-full px-4 py-2 text-sm text-dark-text hover:bg-dark-border/50 flex items-center gap-2 transition-colors"
-              >
-                <UserCircle size={14} />
-                Profile
-              </Link>
-            )}
+            <Link
+              href={`/profile/${user.id}`}
+              onClick={() => setMenuOpen(false)}
+              className="flex items-center gap-2 px-4 py-2.5 text-sm text-dark-text hover:bg-dark-border/50 transition-colors"
+            >
+              <UserIcon size={16} />
+              Your Profile
+            </Link>
+            <Link
+              href="/dashboard"
+              onClick={() => setMenuOpen(false)}
+              className="flex items-center gap-2 px-4 py-2.5 text-sm text-dark-text hover:bg-dark-border/50 transition-colors"
+            >
+              <LayoutDashboard size={16} />
+              Dashboard
+            </Link>
             <Link
               href="/settings"
               onClick={() => setMenuOpen(false)}
-              className="w-full px-4 py-2 text-sm text-dark-text hover:bg-dark-border/50 flex items-center gap-2 transition-colors"
+              className="flex items-center gap-2 px-4 py-2.5 text-sm text-dark-text hover:bg-dark-border/50 transition-colors"
             >
-              <Settings size={14} />
+              <Settings size={16} />
               Settings
             </Link>
             <button
               onClick={() => {
-                disconnect();
                 logout();
+                disconnect();
                 setMenuOpen(false);
               }}
-              className="w-full px-4 py-2 text-sm text-left text-dark-text hover:bg-dark-border/50 flex items-center gap-2 transition-colors"
+              className="w-full flex items-center gap-2 px-4 py-2.5 text-sm text-red-400 hover:bg-red-400/10 transition-colors text-left"
             >
-              <LogOut size={14} />
-              Disconnect
+              <LogOut size={16} />
+              Sign Out
             </button>
           </div>
         )}
@@ -102,17 +123,16 @@ function WalletButton({ className }: { className?: string }) {
   }
 
   return (
-    <div>
-      <button
-        onClick={connect}
-        className={`btn-primary flex items-center gap-2 text-sm ${className ?? ""}`}
+    <div className="flex items-center gap-3">
+      <Link
+        href="/auth/login"
+        className="text-sm font-medium text-dark-text hover:text-dark-heading transition-colors"
       >
-        <Wallet size={16} />
-        Connect Wallet
-      </button>
-      {error && (
-        <p className="text-red-400 text-xs mt-1 max-w-[220px]">{error}</p>
-      )}
+        Log In
+      </Link>
+      <Link href="/auth/register" className="btn-primary text-sm py-2 px-4">
+        Sign Up
+      </Link>
     </div>
   );
 }
@@ -120,11 +140,10 @@ function WalletButton({ className }: { className?: string }) {
 /** Real-time unread badge powered by Socket.io + initial REST count */
 function UnreadBadge() {
   const { socket } = useSocket();
+  const { token } = useAuth();
   const [count, setCount] = useState(0);
 
   useEffect(() => {
-    const token =
-      typeof window !== "undefined" ? localStorage.getItem(TOKEN_KEY) : null;
     if (!token) return;
 
     axios
@@ -132,8 +151,10 @@ function UnreadBadge() {
         headers: { Authorization: `Bearer ${token}` },
       })
       .then((res) => setCount(res.data.count))
-      .catch(() => {/* silently ignore */});
-  }, []);
+      .catch(() => {
+        /* silently ignore */
+      });
+  }, [token]);
 
   useEffect(() => {
     if (!socket) return;
@@ -208,7 +229,7 @@ export default function Navbar() {
               <PenLine size={16} />
               Post a Job
             </Link>
-            <WalletButton />
+            <UserMenu />
           </div>
 
           <button
@@ -247,7 +268,7 @@ export default function Navbar() {
             >
               <PenLine size={18} /> Post a Job
             </Link>
-            <WalletButton className="w-fit" />
+            <UserMenu className="w-fit" />
           </div>
         )}
       </div>
