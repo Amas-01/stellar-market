@@ -1,7 +1,7 @@
 #![no_std]
 
 use soroban_sdk::{
-    contract, contractimpl, contracttype, contracterror, symbol_short, Address, Env, String, Vec,
+    contract, contractimpl, contracttype, contracterror, symbol_short, Address, Env, String, Vec, Symbol,
 };
 
 #[contracterror]
@@ -100,7 +100,7 @@ impl DisputeContract {
             job_id,
             client,
             freelancer,
-            initiator,
+            initiator: initiator.clone(),
             reason,
             status: DisputeStatus::Open,
             votes_for_client: 0,
@@ -118,6 +118,12 @@ impl DisputeContract {
         env.storage()
             .persistent()
             .set(&DataKey::Votes(count), &Vec::<Vote>::new(&env));
+
+        // Emit event
+        env.events().publish(
+            (symbol_short!("dispute"), symbol_short!("raised")),
+            (count, job_id, initiator),
+        );
 
         Ok(count)
     }
@@ -182,6 +188,12 @@ impl DisputeContract {
             .set(&DataKey::Dispute(dispute_id), &dispute);
         env.storage().persistent().set(&voted_key, &true);
 
+        // Emit event
+        env.events().publish(
+            (symbol_short!("dispute"), symbol_short!("voted")),
+            (dispute_id, voter, choice),
+        );
+
         Ok(())
     }
 
@@ -214,6 +226,12 @@ impl DisputeContract {
         env.storage()
             .persistent()
             .set(&DataKey::Dispute(dispute_id), &dispute);
+
+        // Emit event
+        env.events().publish(
+            (symbol_short!("dispute"), symbol_short!("resolved")),
+            (dispute_id, dispute.status.clone()),
+        );
 
         Ok(dispute.status)
     }

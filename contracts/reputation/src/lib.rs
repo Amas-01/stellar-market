@@ -1,7 +1,7 @@
 #![no_std]
 
 use soroban_sdk::{
-    contract, contractimpl, contracttype, contracterror, symbol_short, Address, Env, String, Vec,
+    contract, contractimpl, contracttype, contracterror, symbol_short, Address, Env, String, Vec, Symbol,
 };
 
 #[contracterror]
@@ -121,6 +121,12 @@ impl ReputationContract {
 
         // Mark as reviewed
         env.storage().persistent().set(&review_key, &true);
+
+        // Emit event
+        env.events().publish(
+            (symbol_short!("reput"), symbol_short!("reviewed")),
+            (reviewer, reviewee, job_id, rating),
+        );
 
         Ok(())
     }

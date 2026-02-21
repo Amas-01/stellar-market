@@ -2,7 +2,7 @@
 
 use soroban_sdk::{
     contract, contractimpl, contracttype, contracterror, symbol_short, token, Address, Env, String,
-    Vec,
+    Vec, Symbol,
 };
 
 #[contracterror]
@@ -60,7 +60,7 @@ pub struct Job {
 
 const JOB_COUNT: &str = "JOB_COUNT";
 
-fn get_job_key(job_id: u64) -> (symbol_short!("JOB"), u64) {
+fn get_job_key(job_id: u64) -> (Symbol, u64) {
     (symbol_short!("JOB"), job_id)
 }
 
@@ -99,7 +99,7 @@ impl EscrowContract {
         let job = Job {
             id: job_count,
             client: client.clone(),
-            freelancer,
+            freelancer: freelancer.clone(),
             token,
             total_amount: total,
             status: JobStatus::Created,
@@ -108,6 +108,12 @@ impl EscrowContract {
 
         env.storage().persistent().set(&get_job_key(job_count), &job);
         env.storage().instance().set(&symbol_short!("JOB_CNT"), &job_count);
+
+        // Emit event
+        env.events().publish(
+            (symbol_short!("escrow"), symbol_short!("created")),
+            (job_count, client, freelancer),
+        );
 
         Ok(job_count)
     }
@@ -134,6 +140,12 @@ impl EscrowContract {
 
         job.status = JobStatus::Funded;
         env.storage().persistent().set(&get_job_key(job_id), &job);
+
+        // Emit event
+        env.events().publish(
+            (symbol_short!("escrow"), symbol_short!("funded")),
+            (job_id, client),
+        );
 
         Ok(())
     }
@@ -233,6 +245,12 @@ impl EscrowContract {
 
         env.storage().persistent().set(&get_job_key(job_id), &job);
 
+        // Emit event
+        env.events().publish(
+            (symbol_short!("escrow"), symbol_short!("milestone")),
+            (job_id, milestone_id, client),
+        );
+
         Ok(())
     }
 
@@ -270,6 +288,12 @@ impl EscrowContract {
 
         job.status = JobStatus::Cancelled;
         env.storage().persistent().set(&get_job_key(job_id), &job);
+
+        // Emit event
+        env.events().publish(
+            (symbol_short!("escrow"), symbol_short!("cancelled")),
+            (job_id, client),
+        );
 
         Ok(())
     }
