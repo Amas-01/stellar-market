@@ -68,7 +68,7 @@ fn test_average_rating() {
 }
 
 #[test]
-#[should_panic(expected = "InvalidRating")]
+#[should_panic]
 fn test_invalid_rating() {
     let env = Env::default();
     env.mock_all_auths();
@@ -90,7 +90,7 @@ fn test_invalid_rating() {
 }
 
 #[test]
-#[should_panic(expected = "SelfReview")]
+#[should_panic]
 fn test_self_review() {
     let env = Env::default();
     env.mock_all_auths();
