@@ -78,10 +78,19 @@
                             "hi": 0,
                             "lo": 1000
                           }
+                        },
+                        {
+                          "u64": 9999999999
                         }
                       ]
                     }
                   ]
+                },
+                {
+                  "u64": 9999999999
+                },
+                {
+                  "u64": 10000999999
                 }
               ]
             }
@@ -162,6 +171,21 @@
                 },
                 {
                   "u32": 3
+                },
+                {
+                  "i128": {
+                    "hi": 0,
+                    "lo": 0
+                  }
+                },
+                {
+                  "address": "CACMVW2KK4H5FZDFF2AUCAKQTEJMZZWJUIZF23XMRVYQBSXYLHZ6BKWN"
+                },
+                {
+                  "i128": {
+                    "hi": 0,
+                    "lo": 0
+                  }
                 }
               ]
             }
@@ -314,6 +338,14 @@
                   "map": [
                     {
                       "key": {
+                        "symbol": "auto_refund_after"
+                      },
+                      "val": {
+                        "u64": 10000999999
+                      }
+                    },
+                    {
+                      "key": {
                         "symbol": "client"
                       },
                       "val": {
@@ -338,6 +370,14 @@
                     },
                     {
                       "key": {
+                        "symbol": "job_deadline"
+                      },
+                      "val": {
+                        "u64": 9999999999
+                      }
+                    },
+                    {
+                      "key": {
                         "symbol": "milestones"
                       },
                       "val": {
@@ -353,6 +393,14 @@
                                     "hi": 0,
                                     "lo": 1000
                                   }
+                                }
+                              },
+                              {
+                                "key": {
+                                  "symbol": "deadline"
+                                },
+                                "val": {
+                                  "u64": 9999999999
                                 }
                               },
                               {
@@ -508,6 +556,22 @@
                   "map": [
                     {
                       "key": {
+                        "symbol": "appeal_count"
+                      },
+                      "val": {
+                        "u32": 0
+                      }
+                    },
+                    {
+                      "key": {
+                        "symbol": "appeal_deadline"
+                      },
+                      "val": {
+                        "u64": 0
+                      }
+                    },
+                    {
+                      "key": {
                         "symbol": "client"
                       },
                       "val": {
@@ -520,6 +584,17 @@
                       },
                       "val": {
                         "u64": 0
+                      }
+                    },
+                    {
+                      "key": {
+                        "symbol": "dispute_fee"
+                      },
+                      "val": {
+                        "i128": {
+                          "hi": 0,
+                          "lo": 0
+                        }
                       }
                     },
                     {
@@ -548,10 +623,37 @@
                     },
                     {
                       "key": {
+                        "symbol": "initiator_penalty_stake"
+                      },
+                      "val": {
+                        "i128": {
+                          "hi": 0,
+                          "lo": 0
+                        }
+                      }
+                    },
+                    {
+                      "key": {
                         "symbol": "job_id"
                       },
                       "val": {
                         "u64": 1
+                      }
+                    },
+                    {
+                      "key": {
+                        "symbol": "malicious"
+                      },
+                      "val": {
+                        "bool": false
+                      }
+                    },
+                    {
+                      "key": {
+                        "symbol": "max_appeals"
+                      },
+                      "val": {
+                        "u32": 2
                       }
                     },
                     {
@@ -572,6 +674,14 @@
                     },
                     {
                       "key": {
+                        "symbol": "resolution_timestamp"
+                      },
+                      "val": {
+                        "u64": 0
+                      }
+                    },
+                    {
+                      "key": {
                         "symbol": "status"
                       },
                       "val": {
@@ -580,6 +690,14 @@
                             "symbol": "Voting"
                           }
                         ]
+                      }
+                    },
+                    {
+                      "key": {
+                        "symbol": "token"
+                      },
+                      "val": {
+                        "address": "CACMVW2KK4H5FZDFF2AUCAKQTEJMZZWJUIZF23XMRVYQBSXYLHZ6BKWN"
                       }
                     },
                     {
@@ -1486,10 +1604,19 @@
                             "hi": 0,
                             "lo": 1000
                           }
+                        },
+                        {
+                          "u64": 9999999999
                         }
                       ]
                     }
                   ]
+                },
+                {
+                  "u64": 9999999999
+                },
+                {
+                  "u64": 10000999999
                 }
               ]
             }
@@ -1767,6 +1894,21 @@
                 },
                 {
                   "u32": 3
+                },
+                {
+                  "i128": {
+                    "hi": 0,
+                    "lo": 0
+                  }
+                },
+                {
+                  "address": "CACMVW2KK4H5FZDFF2AUCAKQTEJMZZWJUIZF23XMRVYQBSXYLHZ6BKWN"
+                },
+                {
+                  "i128": {
+                    "hi": 0,
+                    "lo": 0
+                  }
                 }
               ]
             }
