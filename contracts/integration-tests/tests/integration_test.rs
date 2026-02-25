@@ -216,6 +216,7 @@ fn test_dispute_resolved_for_freelancer() {
         &client,
         &String::from_str(&env, "Work quality is not acceptable"),
         &3,
+        &None,
     );
 
     let dispute = dispute_client.get_dispute(&dispute_id_val);
@@ -318,6 +319,7 @@ fn test_dispute_resolved_for_client() {
         &client,
         &String::from_str(&env, "Second milestone not delivered properly"),
         &3,
+        &None,
     );
 
     // Voters side with client
@@ -584,6 +586,7 @@ fn test_duplicate_vote_on_dispute_fails() {
         &client,
         &String::from_str(&env, "Issue"),
         &3,
+        &None,
     );
 
     let voter = Address::generate(&env);
@@ -646,6 +649,7 @@ fn test_dispute_with_all_milestones_approved() {
         &client,
         &String::from_str(&env, "Quality issue"),
         &3,
+        &None,
     );
 
     // Vote and resolve for freelancer (so they get the funds)
