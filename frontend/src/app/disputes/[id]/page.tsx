@@ -3,10 +3,11 @@
 import { useState, useEffect, useCallback } from "react";
 import { useParams } from "next/navigation";
 import Link from "next/link";
-import { ArrowLeft, CheckCircle, AlertCircle, Loader2, MessageSquare, ShieldCheck, User as UserIcon } from "lucide-react";
-import axios from "axios";
+import { ArrowLeft, CheckCircle, AlertCircle, Loader2, ShieldCheck, User as UserIcon } from "lucide-react";
+import axios, { AxiosError } from "axios";
 import { useWallet } from "@/context/WalletContext";
 import { useAuth } from "@/context/AuthContext";
+import { Dispute, Vote } from "@/types";
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:5000/api";
 
@@ -15,7 +16,7 @@ export default function DisputeDetailPage() {
   const { signAndBroadcastTransaction } = useWallet();
   const { user } = useAuth();
   
-  const [dispute, setDispute] = useState<any>(null);
+  const [dispute, setDispute] = useState<Dispute | null>(null);
   const [loading, setLoading] = useState(true);
   const [processing, setProcessing] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -30,7 +31,7 @@ export default function DisputeDetailPage() {
         headers: token ? { Authorization: `Bearer ${token}` } : {},
       });
       setDispute(res.data);
-    } catch (err: unknown) {
+    } catch {
       setError("Failed to fetch dispute details.");
     } finally {
       setLoading(false);
@@ -89,8 +90,14 @@ export default function DisputeDetailPage() {
       setVoteChoice(null);
       setVoteReason("");
       fetchDispute();
-    } catch (err: any) {
-      setError(err.response?.data?.error || err.message || "An error occurred");
+    } catch (err: unknown) {
+      let errorMsg = "An error occurred";
+      if (err instanceof AxiosError) {
+        errorMsg = err.response?.data?.error || err.message;
+      } else if (err instanceof Error) {
+        errorMsg = err.message;
+      }
+      setError(errorMsg);
     } finally {
       setProcessing(false);
     }
@@ -129,8 +136,14 @@ export default function DisputeDetailPage() {
       );
 
       fetchDispute();
-    } catch (err: any) {
-      setError(err.response?.data?.error || err.message || "An error occurred");
+    } catch (err: unknown) {
+      let errorMsg = "An error occurred";
+      if (err instanceof AxiosError) {
+        errorMsg = err.response?.data?.error || err.message;
+      } else if (err instanceof Error) {
+        errorMsg = err.message;
+      }
+      setError(errorMsg);
     } finally {
       setProcessing(false);
     }
@@ -154,7 +167,7 @@ export default function DisputeDetailPage() {
   }
 
   const isParticipant = user?.id === dispute.initiator.id || user?.id === dispute.respondent.id;
-  const hasVoted = dispute.votes.some((v: any) => v.voter.walletAddress === user?.walletAddress);
+  const hasVoted = dispute.votes.some((v: Vote) => v.voter.walletAddress === user?.walletAddress);
   const totalVotes = dispute.votesForClient + dispute.votesForFreelancer;
   const canResolve = totalVotes >= dispute.minVotes && (dispute.status === "OPEN" || dispute.status === "VOTING");
   
@@ -217,7 +230,7 @@ export default function DisputeDetailPage() {
                 <div className="text-center p-8 text-theme-text italic">No votes have been cast yet.</div>
             ) : (
                 <div className="space-y-4">
-                  {dispute.votes.map((vote: any) => (
+                  {dispute.votes.map((vote: Vote) => (
                     <div key={vote.id} className="p-4 border border-theme-border rounded-lg bg-theme-bg">
                         <div className="flex items-center justify-between mb-2">
                             <div className="font-medium text-theme-heading flex items-center gap-2">

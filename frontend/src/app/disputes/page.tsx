@@ -4,22 +4,10 @@ import { useState, useEffect } from "react";
 import Link from "next/link";
 import { AlertCircle, ArrowRight, Loader2, ShieldCheck } from "lucide-react";
 import axios from "axios";
+import { Dispute } from "@/types";
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:5000/api";
 
-type Dispute = {
-  id: string;
-  jobId: string;
-  reason: string;
-  status: string;
-  votesForClient: number;
-  votesForFreelancer: number;
-  minVotes: number;
-  createdAt: string;
-  job: { title: string; budget: number };
-  initiator: { username: string; walletAddress: string };
-  respondent: { username: string; walletAddress: string };
-};
 
 export default function DisputesPage() {
   const [disputes, setDisputes] = useState<Dispute[]>([]);
@@ -30,7 +18,7 @@ export default function DisputesPage() {
       try {
         const res = await axios.get(`${API_URL}/disputes`);
         setDisputes(res.data);
-      } catch (err) {
+      } catch (err: unknown) {
         console.error("Failed to fetch disputes:", err);
       } finally {
         setLoading(false);

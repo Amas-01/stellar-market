@@ -2,7 +2,7 @@
 
 import { useState } from "react";
 import { X, AlertCircle, Loader2 } from "lucide-react";
-import axios from "axios";
+import axios, { AxiosError } from "axios";
 import { useWallet } from "@/context/WalletContext";
 import { Job } from "@/types";
 
@@ -67,8 +67,9 @@ export default function RaiseDisputeModal({ job, isOpen, onClose, onSuccess }: R
 
       onSuccess();
       onClose();
-    } catch (err: any) {
-      setError(err.response?.data?.error || err.message || "An error occurred");
+    } catch (err: unknown) {
+      const errorMsg = err instanceof AxiosError ? err.response?.data?.error : (err instanceof Error ? err.message : "An error occurred");
+      setError(errorMsg || "An error occurred");
     } finally {
       setProcessing(false);
     }

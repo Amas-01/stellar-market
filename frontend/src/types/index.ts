@@ -128,3 +128,32 @@ export interface Notification {
   metadata?: Record<string, unknown>;
   createdAt: string;
 }
+
+export interface Vote {
+  id: string;
+  disputeId: string;
+  voterId: string;
+  choice: "CLIENT" | "FREELANCER";
+  reason: string;
+  createdAt: string;
+  voter: User;
+}
+
+export interface Dispute {
+  id: string;
+  jobId: string;
+  contractDisputeId?: string;
+  initiatorId: string;
+  respondentId: string;
+  reason: string;
+  status: "OPEN" | "VOTING" | "RESOLVED_CLIENT" | "RESOLVED_FREELANCER";
+  votesForClient: number;
+  votesForFreelancer: number;
+  minVotes: number;
+  createdAt: string;
+  updatedAt: string;
+  job: Job;
+  initiator: User;
+  respondent: User;
+  votes: Vote[];
+}
