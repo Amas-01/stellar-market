@@ -12,6 +12,7 @@ import {
   User as UserIcon,
   Settings,
   Search,
+  ShieldCheck,
 } from "lucide-react";
 import axios from "axios";
 import { useState, useRef, useEffect } from "react";
@@ -214,6 +215,13 @@ export default function Navbar() {
               Services
             </Link>
             <Link
+              href="/disputes"
+              className="text-theme-text hover:text-theme-heading transition-colors flex items-center gap-2"
+            >
+              <ShieldCheck size={16} />
+              Disputes
+            </Link>
+            <Link
               href="/dashboard"
               className="text-theme-text hover:text-theme-heading transition-colors flex items-center gap-2"
             >
@@ -262,6 +270,12 @@ export default function Navbar() {
               className="text-theme-text hover:text-theme-heading flex items-center gap-2"
             >
               <Search size={18} /> Services
+            </Link>
+            <Link
+              href="/disputes"
+              className="text-theme-text hover:text-theme-heading flex items-center gap-2"
+            >
+              <ShieldCheck size={18} /> Disputes
             </Link>
             <Link
               href="/dashboard"
