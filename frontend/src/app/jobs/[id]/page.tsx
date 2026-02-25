@@ -2,11 +2,13 @@
 
 import { useState, useEffect, useCallback } from "react";
 import { useParams } from "next/navigation";
-import { Clock, DollarSign, ArrowLeft, MessageSquare, ShieldCheck, AlertCircle, Loader2 } from "lucide-react";
+import { Clock, DollarSign, ArrowLeft, MessageSquare, ShieldCheck, AlertCircle, Loader2, CheckCircle } from "lucide-react";
 import Link from "next/link";
 import axios from "axios";
 import { useWallet } from "@/context/WalletContext";
+import { useAuth } from "@/context/AuthContext";
 import StatusBadge from "@/components/StatusBadge";
+import ApplyModal from "@/components/ApplyModal";
 import { Job } from "@/types";
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:5000/api";
@@ -14,10 +16,13 @@ const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:5000/api";
 export default function JobDetailPage() {
   const { id } = useParams();
   const { address, signAndBroadcastTransaction } = useWallet();
+  const { user } = useAuth();
   const [job, setJob] = useState<Job | null>(null);
   const [loading, setLoading] = useState(true);
   const [processing, setProcessing] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [applyModalOpen, setApplyModalOpen] = useState(false);
+  const [hasApplied, setHasApplied] = useState(false);
 
   const fetchJob = useCallback(async () => {
     try {
@@ -111,6 +116,7 @@ export default function JobDetailPage() {
   }
 
   const isClient = address === job.client.walletAddress;
+  const isOwnJob = user?.id === job.client.id || isClient;
 
   return (
     <div className="max-w-5xl mx-auto px-4 sm:px-6 lg:px-8 py-12">
@@ -239,8 +245,22 @@ export default function JobDetailPage() {
                 </button>
             )}
 
-            {!isClient && job.status === "OPEN" && (
-                <button className="btn-primary w-full">Apply for this Job</button>
+            {!isOwnJob && job.status === "OPEN" && (
+              hasApplied ? (
+                <button
+                  className="btn-secondary w-full flex items-center justify-center gap-2 cursor-default opacity-80"
+                  disabled
+                >
+                  <CheckCircle size={16} /> Applied
+                </button>
+              ) : (
+                <button
+                  className="btn-primary w-full"
+                  onClick={() => setApplyModalOpen(true)}
+                >
+                  Apply for this Job
+                </button>
+              )
             )}
             
             {job.escrowStatus === "FUNDED" && (
@@ -276,6 +296,15 @@ export default function JobDetailPage() {
           </div>
         </div>
       </div>
+
+      {job.status === "OPEN" && !isOwnJob && (
+        <ApplyModal
+          job={job}
+          isOpen={applyModalOpen}
+          onClose={() => setApplyModalOpen(false)}
+          onSuccess={() => setHasApplied(true)}
+        />
+      )}
     </div>
   );
 }
