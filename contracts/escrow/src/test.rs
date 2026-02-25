@@ -1,10 +1,7 @@
-#![cfg(test)]
-
-use super::*;
 use soroban_sdk::{
-    testutils::{Address as _, Ledger},
-    token::StellarAssetClient,
-    vec, Env, String,
+    testutils::{Address as _, Events, Ledger},
+    token::{StellarAssetClient, TokenClient},
+    vec, Address, Env, IntoVal, String, Symbol, Vec,
 };
 
 #[contract]
@@ -17,22 +14,28 @@ impl MockToken {
 
 const GRACE_PERIOD: u64 = 604_800; // 7 days in seconds
 
-// ── Existing tests (updated for auto_refund_after parameter) ─────────────────
+fn setup_test(env: &Env) -> (EscrowContractClient, Address, Address, Address, Address) {
+    let contract_id = env.register_contract(None, EscrowContract);
+    let client = EscrowContractClient::new(env, &contract_id);
+
+    let user_client = Address::generate(env);
+    let freelancer = Address::generate(env);
+    let admin = Address::generate(env);
+
+    let token_address = env.register_stellar_asset_contract(admin.clone());
+    let token_admin = StellarAssetClient::new(env, &token_address);
+    token_admin.mint(&user_client, &10000);
+
+    (client, user_client, freelancer, token_address, admin)
+}
 
 #[test]
 fn test_create_job() {
     let env = Env::default();
     env.mock_all_auths();
-
-    // Set initial timestamp
     env.ledger().with_mut(|l| l.timestamp = 1000);
 
-    let contract_id = env.register_contract(None, EscrowContract);
-    let client = EscrowContractClient::new(&env, &contract_id);
-
-    let user_client = Address::generate(&env);
-    let freelancer = Address::generate(&env);
-    let token = Address::generate(&env);
+    let (contract, client_addr, freelancer, token, _) = setup_test(&env);
 
     let milestones = vec![
         &env,
@@ -49,18 +52,18 @@ fn test_create_job() {
         ),
     ];
 
-    let job_id = client.create_job(
-        &user_client,
+    let job_id = contract.create_job(
+        &client_addr,
         &freelancer,
         &token,
         &milestones,
         &5000_u64,
         &GRACE_PERIOD,
-    );
+    ).unwrap();
     assert_eq!(job_id, 1);
 
-    let job = client.get_job(&job_id);
-    assert_eq!(job.client, user_client);
+    let job = contract.get_job(&job_id).unwrap();
+    assert_eq!(job.client, client_addr);
     assert_eq!(job.freelancer, freelancer);
     assert_eq!(job.total_amount, 3000);
     assert_eq!(job.status, JobStatus::Created);
@@ -75,35 +78,30 @@ fn test_job_count_increments() {
     env.mock_all_auths();
     env.ledger().with_mut(|l| l.timestamp = 1000);
 
-    let contract_id = env.register_contract(None, EscrowContract);
-    let client = EscrowContractClient::new(&env, &contract_id);
-
-    let user = Address::generate(&env);
-    let freelancer = Address::generate(&env);
-    let token = Address::generate(&env);
+    let (contract, user, freelancer, token, _) = setup_test(&env);
 
     let milestones = vec![&env, (String::from_str(&env, "Task 1"), 100_i128, 2000_u64)];
 
-    let id1 = client.create_job(
+    let id1 = contract.create_job(
         &user,
         &freelancer,
         &token,
         &milestones,
         &2500_u64,
         &GRACE_PERIOD,
-    );
-    let id2 = client.create_job(
+    ).unwrap();
+    let id2 = contract.create_job(
         &user,
         &freelancer,
         &token,
         &milestones,
         &2500_u64,
         &GRACE_PERIOD,
-    );
+    ).unwrap();
 
     assert_eq!(id1, 1);
     assert_eq!(id2, 2);
-    assert_eq!(client.get_job_count(), 2);
+    assert_eq!(contract.get_job_count(), 2);
 }
 
 #[test]
@@ -113,19 +111,14 @@ fn test_create_job_invalid_deadline() {
     env.mock_all_auths();
     env.ledger().with_mut(|l| l.timestamp = 1000);
 
-    let contract_id = env.register_contract(None, EscrowContract);
-    let client = EscrowContractClient::new(&env, &contract_id);
-
-    let user = Address::generate(&env);
-    let freelancer = Address::generate(&env);
-    let token = Address::generate(&env);
+    let (contract, user, freelancer, token, _) = setup_test(&env);
 
     let milestones = vec![
         &env,
         (String::from_str(&env, "Task 1"), 100_i128, 500_u64), // Invalid, < 1000
     ];
 
-    client.create_job(
+    contract.create_job(
         &user,
         &freelancer,
         &token,
@@ -551,6 +544,412 @@ fn test_claim_refund_fails_on_cancelled_job() {
 
     // Should fail — job is already cancelled
     escrow.claim_refund(&job_id, &client);
+=======
+    let id1 = contract.create_job(&client, &freelancer, &token, &milestones);
+    let id2 = contract.create_job(&client, &freelancer, &token, &milestones);
+
+    assert_eq!(id1, 1);
+    assert_eq!(id2, 2);
+    assert_eq!(contract.get_job_count(), 2);
+}
+
+// ============================================================
+// JOB REVISION TESTS
+// ============================================================
+
+#[test]
+fn test_client_can_propose_revision() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (contract, client, freelancer, token, _) = setup_test(&env);
+
+    let milestones = vec![&env, (String::from_str(&env, "Initial"), 1000_i128)];
+    let job_id = contract.create_job(&client, &freelancer, &token, &milestones);
+
+    let new_milestones = vec![
+        &env,
+        Milestone {
+            id: 0,
+            description: String::from_str(&env, "New Phase 1"),
+            amount: 600,
+            status: MilestoneStatus::Pending,
+        },
+        Milestone {
+            id: 1,
+            description: String::from_str(&env, "New Phase 2"),
+            amount: 600,
+            status: MilestoneStatus::Pending,
+        },
+    ];
+
+    contract.propose_revision(&client, &job_id, &new_milestones);
+
+    let proposal = contract
+        .get_revision_proposal(&job_id)
+        .expect("Proposal should exist");
+    assert_eq!(proposal.proposer, client);
+    assert_eq!(proposal.new_total, 1200);
+    assert_eq!(proposal.status, ProposalStatus::Pending);
+}
+
+#[test]
+fn test_freelancer_can_propose_revision() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (contract, client, freelancer, token, _) = setup_test(&env);
+
+    let milestones = vec![&env, (String::from_str(&env, "Initial"), 1000_i128)];
+    let job_id = contract.create_job(&client, &freelancer, &token, &milestones);
+
+    let new_milestones = vec![
+        &env,
+        Milestone {
+            id: 0,
+            description: String::from_str(&env, "New"),
+            amount: 1500,
+            status: MilestoneStatus::Pending,
+        },
+    ];
+    contract.propose_revision(&freelancer, &job_id, &new_milestones);
+
+    let proposal = contract
+        .get_revision_proposal(&job_id)
+        .expect("Proposal should exist");
+    assert_eq!(proposal.proposer, freelancer);
+    assert_eq!(proposal.new_total, 1500);
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #19)")]
+fn test_propose_revision_fails_for_non_party() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (contract, client, freelancer, token, _) = setup_test(&env);
+    let third_party = Address::generate(&env);
+
+    let milestones = vec![&env, (String::from_str(&env, "Initial"), 1000_i128)];
+    let job_id = contract.create_job(&client, &freelancer, &token, &milestones);
+
+    let new_milestones = vec![
+        &env,
+        Milestone {
+            id: 0,
+            description: String::from_str(&env, "New"),
+            amount: 1200,
+            status: MilestoneStatus::Pending,
+        },
+    ];
+    contract.propose_revision(&third_party, &job_id, &new_milestones);
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #17)")]
+fn test_propose_revision_fails_when_pending_proposal_exists() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (contract, client, freelancer, token, _) = setup_test(&env);
+
+    let milestones = vec![&env, (String::from_str(&env, "Initial"), 1000_i128)];
+    let job_id = contract.create_job(&client, &freelancer, &token, &milestones);
+
+    let new_milestones = vec![
+        &env,
+        Milestone {
+            id: 0,
+            description: String::from_str(&env, "New"),
+            amount: 1200,
+            status: MilestoneStatus::Pending,
+        },
+    ];
+    contract.propose_revision(&client, &job_id, &new_milestones);
+    contract.propose_revision(&freelancer, &job_id, &new_milestones);
+}
+
+#[test]
+fn test_propose_revision_allowed_after_rejection() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (contract, client, freelancer, token, _) = setup_test(&env);
+
+    let milestones = vec![&env, (String::from_str(&env, "Initial"), 1000_i128)];
+    let job_id = contract.create_job(&client, &freelancer, &token, &milestones);
+
+    let new_milestones = vec![
+        &env,
+        Milestone {
+            id: 0,
+            description: String::from_str(&env, "New"),
+            amount: 1200,
+            status: MilestoneStatus::Pending,
+        },
+    ];
+    contract.propose_revision(&client, &job_id, &new_milestones);
+    contract.reject_revision(&freelancer, &job_id);
+
+    // Now should be able to propose again
+    contract.propose_revision(&freelancer, &job_id, &new_milestones);
+    let proposal = contract
+        .get_revision_proposal(&job_id)
+        .expect("Proposal should exist");
+    assert_eq!(proposal.proposer, freelancer);
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #23)")]
+fn test_propose_revision_fails_for_empty_milestones() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (contract, client, freelancer, token, _) = setup_test(&env);
+
+    let milestones = vec![&env, (String::from_str(&env, "Initial"), 1000_i128)];
+    let job_id = contract.create_job(&client, &freelancer, &token, &milestones);
+
+    let empty_milestones: Vec<Milestone> = vec![&env];
+    contract.propose_revision(&client, &job_id, &empty_milestones);
+}
+
+#[test]
+fn test_propose_revision_new_total_equals_sum_of_milestones() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (contract, client, freelancer, token, _) = setup_test(&env);
+
+    let milestones = vec![&env, (String::from_str(&env, "Initial"), 1000_i128)];
+    let job_id = contract.create_job(&client, &freelancer, &token, &milestones);
+
+    let new_milestones = vec![
+        &env,
+        Milestone {
+            id: 0,
+            description: String::from_str(&env, "M1"),
+            amount: 400,
+            status: MilestoneStatus::Pending,
+        },
+        Milestone {
+            id: 1,
+            description: String::from_str(&env, "M2"),
+            amount: 800,
+            status: MilestoneStatus::Pending,
+        },
+    ];
+    contract.propose_revision(&client, &job_id, &new_milestones);
+    let proposal = contract.get_revision_proposal(&job_id).unwrap();
+    assert_eq!(proposal.new_total, 1200);
+}
+
+#[test]
+fn test_accept_revision_same_total_updates_milestones_only() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (contract, client, freelancer, token_addr, admin) = setup_test(&env);
+    let token = TokenClient::new(&env, &token_addr);
+
+    let milestones = vec![&env, (String::from_str(&env, "Initial"), 1000_i128)];
+    let job_id = contract.create_job(&client, &freelancer, &token_addr, &milestones);
+    contract.fund_job(&job_id, &client);
+
+    let initial_escrow_balance = token.balance(&contract.address);
+    assert_eq!(initial_escrow_balance, 1000);
+
+    let new_milestones = vec![
+        &env,
+        Milestone {
+            id: 0,
+            description: String::from_str(&env, "Split 1"),
+            amount: 500,
+            status: MilestoneStatus::Pending,
+        },
+        Milestone {
+            id: 1,
+            description: String::from_str(&env, "Split 2"),
+            amount: 500,
+            status: MilestoneStatus::Pending,
+        },
+    ];
+    contract.propose_revision(&freelancer, &job_id, &new_milestones);
+    contract.accept_revision(&client, &job_id);
+
+    let job = contract.get_job(&job_id);
+    assert_eq!(job.milestones.len(), 2);
+    assert_eq!(job.total_amount, 1000);
+    assert_eq!(
+        token.balance(&contract.address),
+        1000,
+        "Escrow balance should not change for neutral budget"
+    );
+}
+
+#[test]
+fn test_accept_revision_with_increased_total_transfers_difference_from_client() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (contract, client, freelancer, token_addr, _) = setup_test(&env);
+    let token = TokenClient::new(&env, &token_addr);
+
+    let milestones = vec![&env, (String::from_str(&env, "Initial"), 1000_i128)];
+    let job_id = contract.create_job(&client, &freelancer, &token_addr, &milestones);
+    contract.fund_job(&job_id, &client);
+
+    let client_initial_balance = token.balance(&client);
+
+    let new_milestones = vec![
+        &env,
+        Milestone {
+            id: 0,
+            description: String::from_str(&env, "More"),
+            amount: 1500,
+            status: MilestoneStatus::Pending,
+        },
+    ];
+    contract.propose_revision(&freelancer, &job_id, &new_milestones);
+    contract.accept_revision(&client, &job_id);
+
+    assert_eq!(token.balance(&contract.address), 1500);
+    assert_eq!(token.balance(&client), client_initial_balance - 500);
+    let job = contract.get_job(&job_id);
+    assert_eq!(job.total_amount, 1500);
+}
+
+#[test]
+fn test_accept_revision_with_decreased_total_refunds_difference_to_client() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (contract, client, freelancer, token_addr, _) = setup_test(&env);
+    let token = TokenClient::new(&env, &token_addr);
+
+    let milestones = vec![&env, (String::from_str(&env, "Initial"), 2000_i128)];
+    let job_id = contract.create_job(&client, &freelancer, &token_addr, &milestones);
+    contract.fund_job(&job_id, &client);
+
+    let client_balance_after_funding = token.balance(&client);
+
+    let new_milestones = vec![
+        &env,
+        Milestone {
+            id: 0,
+            description: String::from_str(&env, "Less"),
+            amount: 1200,
+            status: MilestoneStatus::Pending,
+        },
+    ];
+    contract.propose_revision(&freelancer, &job_id, &new_milestones);
+    contract.accept_revision(&client, &job_id);
+
+    assert_eq!(token.balance(&contract.address), 1200);
+    assert_eq!(token.balance(&client), client_balance_after_funding + 800);
+}
+
+#[test]
+fn test_reject_revision_sets_status_to_rejected() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (contract, client, freelancer, token, _) = setup_test(&env);
+
+    let milestones = vec![&env, (String::from_str(&env, "Initial"), 1000_i128)];
+    let job_id = contract.create_job(&client, &freelancer, &token, &milestones);
+
+    let new_milestones = vec![
+        &env,
+        Milestone {
+            id: 0,
+            description: String::from_str(&env, "New"),
+            amount: 1200,
+            status: MilestoneStatus::Pending,
+        },
+    ];
+    contract.propose_revision(&client, &job_id, &new_milestones);
+    contract.reject_revision(&freelancer, &job_id);
+
+    let proposal = contract.get_revision_proposal(&job_id).unwrap();
+    assert_eq!(proposal.status, ProposalStatus::Rejected);
+
+    let job = contract.get_job(&job_id);
+    assert_eq!(
+        job.total_amount, 1000,
+        "Job total should not change after rejection"
+    );
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #19)")]
+fn test_proposer_cannot_accept_own_proposal() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (contract, client, freelancer, token, _) = setup_test(&env);
+
+    let milestones = vec![&env, (String::from_str(&env, "Initial"), 1000_i128)];
+    let job_id = contract.create_job(&client, &freelancer, &token, &milestones);
+
+    let new_milestones = vec![
+        &env,
+        Milestone {
+            id: 0,
+            description: String::from_str(&env, "New"),
+            amount: 1200,
+            status: MilestoneStatus::Pending,
+        },
+    ];
+    contract.propose_revision(&client, &job_id, &new_milestones);
+    contract.accept_revision(&client, &job_id);
+}
+
+#[test]
+fn test_propose_revision_emits_event() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (contract, client, freelancer, token, _) = setup_test(&env);
+
+    let milestones = vec![&env, (String::from_str(&env, "Initial"), 1000_i128)];
+    let job_id = contract.create_job(&client, &freelancer, &token, &milestones);
+
+    let new_milestones = vec![
+        &env,
+        Milestone {
+            id: 0,
+            description: String::from_str(&env, "New"),
+            amount: 1200,
+            status: MilestoneStatus::Pending,
+        },
+    ];
+    contract.propose_revision(&client, &job_id, &new_milestones);
+
+    let events = env.events().all();
+    let last_event = events.last().expect("Event should be emitted");
+    assert_eq!(
+        last_event.topics.get(0).unwrap(),
+        Symbol::new(&env, "revision_proposed").into_val(&env)
+    );
+}
+
+#[test]
+fn test_accept_revision_emits_event() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (contract, client, freelancer, token, _) = setup_test(&env);
+
+    let milestones = vec![&env, (String::from_str(&env, "Initial"), 1000_i128)];
+    let job_id = contract.create_job(&client, &freelancer, &token, &milestones);
+    contract.fund_job(&job_id, &client);
+
+    let new_milestones = vec![
+        &env,
+        Milestone {
+            id: 0,
+            description: String::from_str(&env, "New"),
+            amount: 1200,
+            status: MilestoneStatus::Pending,
+        },
+    ];
+    contract.propose_revision(&freelancer, &job_id, &new_milestones);
+    contract.accept_revision(&client, &job_id);
+
+    let events = env.events().all();
+    let last_event = events.last().expect("Event should be emitted");
+    assert_eq!(
+        last_event.topics.get(0).unwrap(),
+        Symbol::new(&env, "revision_accepted").into_val(&env)
+    );
+>>>>>>> 713bf41 (feat: implement job revision and scope renegotiation flow in escrow contract)
 }
 
 #[test]
