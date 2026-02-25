@@ -1,6 +1,7 @@
 "use client";
 
 import Link from "next/link";
+import Image from "next/image";
 import {
   Menu,
   X,
@@ -57,10 +58,13 @@ function UserMenu({ className }: { className?: string }) {
         >
           <div className="w-8 h-8 rounded-full bg-gradient-to-br from-stellar-blue to-stellar-purple flex items-center justify-center text-white font-bold text-sm">
             {user.avatarUrl ? (
-              <img
+              <Image
                 src={user.avatarUrl}
                 alt={user.username}
+                width={32}
+                height={32}
                 className="w-full h-full rounded-full object-cover"
+                unoptimized
               />
             ) : (
               user.username.charAt(0).toUpperCase()
