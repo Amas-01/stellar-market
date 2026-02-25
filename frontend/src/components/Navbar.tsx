@@ -1,6 +1,7 @@
 "use client";
 
 import Link from "next/link";
+import Image from "next/image";
 import {
   Menu,
   X,
@@ -12,6 +13,7 @@ import {
   User as UserIcon,
   Settings,
   Search,
+  ShieldCheck,
 } from "lucide-react";
 import axios from "axios";
 import { useState, useRef, useEffect } from "react";
@@ -56,10 +58,13 @@ function UserMenu({ className }: { className?: string }) {
         >
           <div className="w-8 h-8 rounded-full bg-gradient-to-br from-stellar-blue to-stellar-purple flex items-center justify-center text-white font-bold text-sm">
             {user.avatarUrl ? (
-              <img
+              <Image
                 src={user.avatarUrl}
                 alt={user.username}
+                width={32}
+                height={32}
                 className="w-full h-full rounded-full object-cover"
+                unoptimized
               />
             ) : (
               user.username.charAt(0).toUpperCase()
@@ -214,6 +219,13 @@ export default function Navbar() {
               Services
             </Link>
             <Link
+              href="/disputes"
+              className="text-theme-text hover:text-theme-heading transition-colors flex items-center gap-2"
+            >
+              <ShieldCheck size={16} />
+              Disputes
+            </Link>
+            <Link
               href="/dashboard"
               className="text-theme-text hover:text-theme-heading transition-colors flex items-center gap-2"
             >
@@ -262,6 +274,12 @@ export default function Navbar() {
               className="text-theme-text hover:text-theme-heading flex items-center gap-2"
             >
               <Search size={18} /> Services
+            </Link>
+            <Link
+              href="/disputes"
+              className="text-theme-text hover:text-theme-heading flex items-center gap-2"
+            >
+              <ShieldCheck size={18} /> Disputes
             </Link>
             <Link
               href="/dashboard"
