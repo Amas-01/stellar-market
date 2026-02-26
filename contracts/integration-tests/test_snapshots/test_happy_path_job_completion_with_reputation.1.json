@@ -598,7 +598,7 @@
             "key": {
               "vec": [
                 {
-                  "symbol": "Job"
+                  "symbol": "JOB"
                 },
                 {
                   "u64": 1
@@ -618,7 +618,7 @@
                 "key": {
                   "vec": [
                     {
-                      "symbol": "Job"
+                      "symbol": "JOB"
                     },
                     {
                       "u64": 1
@@ -895,11 +895,7 @@
                     "storage": [
                       {
                         "key": {
-                          "vec": [
-                            {
-                              "symbol": "JobCount"
-                            }
-                          ]
+                          "symbol": "JOB_CNT"
                         },
                         "val": {
                           "u64": 1
@@ -1685,18 +1681,6 @@
                             "hi": 0,
                             "lo": 10000000
                           }
-                        }
-                      },
-                      {
-                        "key": {
-                          "vec": [
-                            {
-                              "symbol": "Paused"
-                            }
-                          ]
-                        },
-                        "val": {
-                          "bool": false
                         }
                       },
                       {
