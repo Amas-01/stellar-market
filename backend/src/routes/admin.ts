@@ -151,7 +151,7 @@ router.delete("/jobs/:id", async (req: AuthRequest, res: Response): Promise<void
         if (job.clientId) {
             await NotificationService.sendNotification({
                 userId: job.clientId,
-                type: "CANCELLED" as any, // Or a more specific type if added to Enum
+                type: "CANCELLED" as any,
                 title: "Job Removed by Moderator",
                 message: `Your job listing "${job.title}" has been removed by a platform administrator for violating terms.`,
             });
@@ -276,8 +276,74 @@ router.get("/audit-log", async (req: AuthRequest, res: Response): Promise<void> 
     }
 });
 
-// Re-implementing legacy routes if needed or keeping them mapped
-// POST /api/admin/jobs/:id/flag
+/**
+ * GET /api/admin/flagged
+ * List all flagged jobs and suspended users (Upstream merge)
+ */
+router.get("/flagged", async (req: AuthRequest, res: Response): Promise<void> => {
+    try {
+        const [flaggedJobs, suspendedUsers] = await Promise.all([
+            prisma.job.findMany({
+                where: { isFlagged: true },
+                include: {
+                    client: {
+                        select: { id: true, username: true, walletAddress: true },
+                    },
+                },
+                orderBy: { flaggedAt: "desc" },
+            }),
+            prisma.user.findMany({
+                where: { isSuspended: true },
+                select: { id: true, username: true, walletAddress: true, suspendReason: true, suspendedAt: true },
+                orderBy: { suspendedAt: "desc" },
+            }),
+        ]);
+
+        res.json({
+            flaggedJobs: flaggedJobs.map((job) => ({
+                id: job.id,
+                title: job.title,
+                client: job.client,
+                flagReason: job.flagReason,
+                flaggedAt: job.flaggedAt,
+            })),
+            suspendedUsers: suspendedUsers,
+        });
+    } catch (error) {
+        console.error("Error fetching flagged content:", error);
+        res.status(500).json({ error: "Internal server error" });
+    }
+});
+
+/**
+ * GET /api/admin/stats
+ * Get moderation statistics (Upstream merge)
+ */
+router.get("/stats", async (req: AuthRequest, res: Response): Promise<void> => {
+    try {
+        const [totalJobs, flaggedJobs, totalUsers, suspendedUsers] = await Promise.all([
+            prisma.job.count(),
+            prisma.job.count({ where: { isFlagged: true } }),
+            prisma.user.count(),
+            prisma.user.count({ where: { isSuspended: true } }),
+        ]);
+
+        res.json({
+            totalJobs,
+            flaggedJobs,
+            totalUsers,
+            suspendedUsers,
+        });
+    } catch (error) {
+        console.error("Error fetching stats:", error);
+        res.status(500).json({ error: "Internal server error" });
+    }
+});
+
+/**
+ * POST /api/admin/jobs/:id/flag
+ * Flag a job with reason
+ */
 router.post("/jobs/:id/flag", async (req: AuthRequest, res: Response): Promise<void> => {
     try {
         const id = req.params.id as string;
@@ -311,26 +377,109 @@ router.post("/jobs/:id/flag", async (req: AuthRequest, res: Response): Promise<v
     }
 });
 
-// Dependency for legacy route POST /api/admin/users/:id/suspend (now replaced by PATCH)
-// Keeping legacy mappings if frontend depends on POST
-router.post("/users/:id/suspend", async (req: AuthRequest, res: Response): Promise<void> => {
+/**
+ * POST /api/admin/jobs/:id/dismiss
+ * Remove flag from job (Upstream merge)
+ */
+router.post("/jobs/:id/dismiss", async (req: AuthRequest, res: Response): Promise<void> => {
+    try {
+        const id = req.params.id as string;
+
+        const job = await prisma.job.findUnique({ where: { id } });
+        if (!job) {
+            res.status(404).json({ error: "Job not found" });
+            return;
+        }
+
+        const updatedJob = await prisma.job.update({
+            where: { id },
+            data: {
+                isFlagged: false,
+                flagReason: null,
+                flaggedAt: null,
+                flaggedBy: null,
+            },
+        });
+
+        await logAdminAction(req.userId!, "DISMISS_JOB_FLAG", id);
+
+        res.json({ message: "Job flag dismissed successfully", job: updatedJob });
+    } catch (error) {
+        res.status(500).json({ error: "Internal server error" });
+    }
+});
+
+/**
+ * POST /api/admin/jobs/:id/remove
+ * Legacy mapping for job removal
+ */
+router.post("/jobs/:id/remove", async (req: AuthRequest, res: Response): Promise<void> => {
     const id = req.params.id as string;
-    const validatedData = suspendUserSchema.parse(req.body);
+    const job = await prisma.job.findUnique({ where: { id } });
+    if (!job) {
+        res.status(404).json({ error: "Job not found" });
+        return;
+    }
+    await prisma.job.delete({ where: { id } });
+    await logAdminAction(req.userId!, "DELETE_JOB", id, { title: job.title });
+    res.json({ message: "Job removed successfully" });
+});
 
-    const updatedUser = await prisma.user.update({
-        where: { id },
-        data: {
-            isSuspended: true,
-            suspendReason: validatedData.suspendReason,
-            suspendedAt: new Date(),
-        },
-    });
+/**
+ * POST /api/admin/users/:id/suspend
+ * Legacy mapping for user suspension
+ */
+router.post("/users/:id/suspend", async (req: AuthRequest, res: Response): Promise<void> => {
+    try {
+        const id = req.params.id as string;
+        const validatedData = suspendUserSchema.parse(req.body);
 
-    await logAdminAction(req.userId!, "SUSPEND_USER", id, { reason: validatedData.suspendReason });
+        const updatedUser = await prisma.user.update({
+            where: { id },
+            data: {
+                isSuspended: true,
+                suspendReason: validatedData.suspendReason,
+                suspendedAt: new Date(),
+            },
+        });
 
-    res.json({ message: "User suspended successfully", user: updatedUser });
+        await logAdminAction(req.userId!, "SUSPEND_USER", id, { reason: validatedData.suspendReason });
+
+        res.json({ message: "User suspended successfully", user: updatedUser });
+    } catch (error) {
+        res.status(500).json({ error: "Internal server error" });
+    }
+});
+
+/**
+ * POST /api/admin/users/:id/restore
+ * Legacy mapping for user restoration (Upstream merge)
+ */
+router.post("/users/:id/restore", async (req: AuthRequest, res: Response): Promise<void> => {
+    try {
+        const id = req.params.id as string;
+
+        const user = await prisma.user.findUnique({ where: { id } });
+        if (!user) {
+            res.status(404).json({ error: "User not found" });
+            return;
+        }
+
+        const updatedUser = await prisma.user.update({
+            where: { id },
+            data: {
+                isSuspended: false,
+                suspendReason: null,
+                suspendedAt: null,
+            },
+        });
+
+        await logAdminAction(req.userId!, "UNSUSPEND_USER", id);
+
+        res.json({ message: "User restored successfully", user: updatedUser });
+    } catch (error) {
+        res.status(500).json({ error: "Internal server error" });
+    }
 });
 
 export default router;
-
-

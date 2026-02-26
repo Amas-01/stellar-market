@@ -129,7 +129,7 @@
             "key": {
               "vec": [
                 {
-                  "symbol": "JOB"
+                  "symbol": "Job"
                 },
                 {
                   "u64": 1
@@ -149,7 +149,7 @@
                 "key": {
                   "vec": [
                     {
-                      "symbol": "JOB"
+                      "symbol": "Job"
                     },
                     {
                       "u64": 1
