@@ -225,38 +225,22 @@ router.get(
     const id = req.params.id as string;
     const cacheKey = generateUserCacheKey(id);
 
-    const user = await prisma.user.findUnique({
-      where: { id },
-      select: {
-        id: true,
-        username: true,
-        bio: true,
-        avatarUrl: true,
-        role: true,
-        skills: true,
-        createdAt: true,
-        reviewsReceived: {
-          include: {
-            reviewer: {
-              select: {
-                id: true,
-                username: true,
-                avatarUrl: true,
     try {
-      // Cache for 5 minutes (300 seconds)
       const { data, hit } = await cache(cacheKey, 300, async () => {
         const user = await prisma.user.findUnique({
           where: { id },
           select: {
             id: true,
             username: true,
-            walletAddress: true,
             bio: true,
             avatarUrl: true,
             role: true,
+            skills: true,
             createdAt: true,
             reviewsReceived: {
-              include: {
+              orderBy: { createdAt: "desc" as const },
+              select: {
+                rating: true,
                 reviewer: {
                   select: {
                     id: true,
@@ -265,15 +249,26 @@ router.get(
                   },
                 },
               },
-              orderBy: { createdAt: "desc" },
             },
             clientJobs: {
               where: { status: "COMPLETED" },
-              orderBy: { updatedAt: "desc" },
+              orderBy: { updatedAt: "desc" as const },
+              select: {
+                id: true,
+                title: true,
+                status: true,
+                updatedAt: true,
+              },
             },
             freelancerJobs: {
               where: { status: "COMPLETED" },
-              orderBy: { updatedAt: "desc" },
+              orderBy: { updatedAt: "desc" as const },
+              select: {
+                id: true,
+                title: true,
+                status: true,
+                updatedAt: true,
+              },
             },
           },
         });
@@ -282,11 +277,10 @@ router.get(
           throw new Error("User not found");
         }
 
-        // Calculate aggregate rating
-        const ratings: number[] = user.reviewsReceived.map((r: any) => r.rating);
+        const ratings: number[] = user.reviewsReceived.map((r) => r.rating);
         const averageRating =
           ratings.length > 0
-            ? ratings.reduce((a: number, b: number) => a + b, 0) / ratings.length
+            ? ratings.reduce((a, b) => a + b, 0) / ratings.length
             : 0;
 
         return {
@@ -296,8 +290,7 @@ router.get(
         };
       });
 
-      // Add cache hit status to response headers for debugging
-      res.set('X-Cache-Hit', hit.toString());
+      res.set("X-Cache-Hit", hit.toString());
       res.json(data);
     } catch (error) {
       if (error instanceof Error && error.message === "User not found") {
