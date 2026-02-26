@@ -655,7 +655,7 @@ fn test_initialize_pause() {
     let client = EscrowContractClient::new(&env, &contract_id);
 
     let admin = Address::generate(&env);
-    client.initialize(&admin);
+    client.initialize(&admin, &admin, &100u32);
 
     // Verify admin is set
     // Note: We can't directly check the admin value since it's private,
@@ -674,7 +674,7 @@ fn test_pause_unauthorized() {
     let admin = Address::generate(&env);
     let non_admin = Address::generate(&env);
 
-    client.initialize(&admin);
+    client.initialize(&admin, &admin, &100u32);
 
     // Try to pause with non-admin address
     client.pause(&non_admin);
@@ -689,7 +689,7 @@ fn test_pause_and_unpause() {
     let client = EscrowContractClient::new(&env, &contract_id);
 
     let admin = Address::generate(&env);
-    client.initialize(&admin);
+    client.initialize(&admin, &admin, &100u32);
 
     // Create a job first
     let user = Address::generate(&env);
@@ -737,7 +737,7 @@ fn test_create_job_when_paused() {
     let client = EscrowContractClient::new(&env, &contract_id);
 
     let admin = Address::generate(&env);
-    client.initialize(&admin);
+    client.initialize(&admin, &admin, &100u32);
     client.pause(&admin);
 
     let user = Address::generate(&env);
@@ -765,7 +765,7 @@ fn test_fund_job_when_paused() {
     let client = EscrowContractClient::new(&env, &contract_id);
 
     let admin = Address::generate(&env);
-    client.initialize(&admin);
+    client.initialize(&admin, &admin, &100u32);
 
     let user = Address::generate(&env);
     let freelancer = Address::generate(&env);
@@ -796,7 +796,7 @@ fn test_submit_milestone_when_paused() {
     let client = EscrowContractClient::new(&env, &contract_id);
 
     let admin = Address::generate(&env);
-    client.initialize(&admin);
+    client.initialize(&admin, &admin, &100u32);
 
     let user = Address::generate(&env);
     let freelancer = Address::generate(&env);
@@ -828,7 +828,7 @@ fn test_approve_milestone_when_paused() {
     let client = EscrowContractClient::new(&env, &contract_id);
 
     let admin = Address::generate(&env);
-    client.initialize(&admin);
+    client.initialize(&admin, &admin, &100u32);
 
     let user = Address::generate(&env);
     let freelancer = Address::generate(&env);
@@ -861,7 +861,7 @@ fn test_claim_refund_when_paused() {
     let client = EscrowContractClient::new(&env, &contract_id);
 
     let admin = Address::generate(&env);
-    client.initialize(&admin);
+    client.initialize(&admin, &admin, &100u32);
 
     let user = Address::generate(&env);
     let freelancer = Address::generate(&env);
@@ -898,7 +898,7 @@ fn test_extend_deadline_when_paused() {
     let client = EscrowContractClient::new(&env, &contract_id);
 
     let admin = Address::generate(&env);
-    client.initialize(&admin);
+    client.initialize(&admin, &admin, &100u32);
 
     let user = Address::generate(&env);
     let freelancer = Address::generate(&env);
@@ -928,7 +928,7 @@ fn test_read_only_functions_when_paused() {
     let client = EscrowContractClient::new(&env, &contract_id);
 
     let admin = Address::generate(&env);
-    client.initialize(&admin);
+    client.initialize(&admin, &admin, &100u32);
 
     let user = Address::generate(&env);
     let freelancer = Address::generate(&env);

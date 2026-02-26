@@ -1,10 +1,9 @@
 {
   "generators": {
-    "address": 3,
+    "address": 2,
     "nonce": 0
   },
   "auth": [
-    [],
     []
   ],
   "ledger": {
@@ -39,44 +38,7 @@
                     "executable": {
                       "wasm": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
                     },
-                    "storage": [
-                      {
-                        "key": {
-                          "symbol": "ADM"
-                        },
-                        "val": {
-                          "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAFCT4"
-                        }
-                      },
-                      {
-                        "key": {
-                          "symbol": "FEE"
-                        },
-                        "val": {
-                          "u32": 100
-                        }
-                      },
-                      {
-                        "key": {
-                          "symbol": "TRE"
-                        },
-                        "val": {
-                          "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAFCT4"
-                        }
-                      },
-                      {
-                        "key": {
-                          "vec": [
-                            {
-                              "symbol": "Paused"
-                            }
-                          ]
-                        },
-                        "val": {
-                          "bool": false
-                        }
-                      }
-                    ]
+                    "storage": null
                   }
                 }
               }
@@ -125,7 +87,7 @@
                 "bytes": "0000000000000000000000000000000000000000000000000000000000000001"
               },
               {
-                "symbol": "initialize"
+                "symbol": "register_referral"
               }
             ],
             "data": {
@@ -135,9 +97,6 @@
                 },
                 {
                   "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAFCT4"
-                },
-                {
-                  "u32": 100
                 }
               ]
             }
@@ -158,54 +117,7 @@
                 "symbol": "fn_return"
               },
               {
-                "symbol": "initialize"
-              }
-            ],
-            "data": "void"
-          }
-        }
-      },
-      "failed_call": false
-    },
-    {
-      "event": {
-        "ext": "v0",
-        "contract_id": null,
-        "type_": "diagnostic",
-        "body": {
-          "v0": {
-            "topics": [
-              {
-                "symbol": "fn_call"
-              },
-              {
-                "bytes": "0000000000000000000000000000000000000000000000000000000000000001"
-              },
-              {
-                "symbol": "pause"
-              }
-            ],
-            "data": {
-              "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHK3M"
-            }
-          }
-        }
-      },
-      "failed_call": false
-    },
-    {
-      "event": {
-        "ext": "v0",
-        "contract_id": "0000000000000000000000000000000000000000000000000000000000000001",
-        "type_": "diagnostic",
-        "body": {
-          "v0": {
-            "topics": [
-              {
-                "symbol": "fn_return"
-              },
-              {
-                "symbol": "pause"
+                "symbol": "register_referral"
               }
             ],
             "data": {
@@ -266,12 +178,15 @@
                   "string": "contract call failed"
                 },
                 {
-                  "symbol": "pause"
+                  "symbol": "register_referral"
                 },
                 {
                   "vec": [
                     {
-                      "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHK3M"
+                      "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAFCT4"
+                    },
+                    {
+                      "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAFCT4"
                     }
                   ]
                 }

@@ -3,8 +3,6 @@
 use soroban_sdk::{
     contract, contracterror, contractimpl, contracttype, symbol_short, token, Address, Env, String,
     Vec,
-    contract, contracterror, contractimpl, contracttype, symbol_short, token, Address, Env, String,
-    Vec,
 };
 mod escrow {
     use soroban_sdk::{contracttype, Address, String, Vec};
@@ -80,6 +78,9 @@ pub enum ReputationError {
     RateLimitExceeded = 12,
     ContractPaused = 13,
     NotAdmin = 14,
+    AlreadyReferred = 15,
+    SelfReferral = 16,
+    CircularReferral = 17,
 }
 
 #[contracttype]
@@ -142,6 +143,10 @@ enum DataKey {
     LastReviewLedger(Address),
     Token,
     Paused,
+    Referrer(Address),
+    ReferralStats(Address),
+    BonusPaid(Address),
+    ReferralBonus,
 }
 
 fn require_not_paused(env: &Env) -> Result<(), ReputationError> {
@@ -212,9 +217,6 @@ fn bump_instance_ttl(env: &Env) {
     env.storage()
         .instance()
         .extend_ttl(MIN_TTL_THRESHOLD, MIN_TTL_EXTEND_TO);
-    env.storage()
-        .instance()
-        .extend_ttl(MIN_TTL_THRESHOLD, MIN_TTL_EXTEND_TO);
 }
 
 /// Calculate the reputation tier based on average rating score.
@@ -273,11 +275,6 @@ impl ReputationContract {
             .instance()
             .get(&DataKey::MinStake)
             .unwrap_or(MIN_REVIEW_STAKE_DEFAULT);
-        let min_stake = env
-            .storage()
-            .instance()
-            .get(&DataKey::MinStake)
-            .unwrap_or(MIN_REVIEW_STAKE_DEFAULT);
         if stake_weight < min_stake {
             return Err(ReputationError::BelowMinStake);
         }
@@ -288,18 +285,8 @@ impl ReputationContract {
             .instance()
             .get(&DataKey::RateLimit)
             .unwrap_or(RATE_LIMIT_LEDGERS_DEFAULT);
-        let rate_limit = env
-            .storage()
-            .instance()
-            .get(&DataKey::RateLimit)
-            .unwrap_or(RATE_LIMIT_LEDGERS_DEFAULT);
         if rate_limit > 0 {
             let last_ledger_key = DataKey::LastReviewLedger(reviewer.clone());
-            if let Some(last_ledger) = env
-                .storage()
-                .persistent()
-                .get::<DataKey, u32>(&last_ledger_key)
-            {
             if let Some(last_ledger) = env
                 .storage()
                 .persistent()
@@ -314,15 +301,7 @@ impl ReputationContract {
             env.storage()
                 .persistent()
                 .set(&last_ledger_key, &current_ledger);
-            env.storage()
-                .persistent()
-                .set(&last_ledger_key, &current_ledger);
             // Extend TTL for rate limit data
-            env.storage().persistent().extend_ttl(
-                &last_ledger_key,
-                MIN_TTL_THRESHOLD,
-                MIN_TTL_EXTEND_TO,
-            );
             env.storage().persistent().extend_ttl(
                 &last_ledger_key,
                 MIN_TTL_THRESHOLD,
@@ -747,18 +726,10 @@ impl ReputationContract {
             .instance()
             .get(&DataKey::MinStake)
             .unwrap_or(MIN_REVIEW_STAKE_DEFAULT)
-        env.storage()
-            .instance()
-            .get(&DataKey::MinStake)
-            .unwrap_or(MIN_REVIEW_STAKE_DEFAULT)
     }
 
     /// Get the current rate limit in ledgers.
     pub fn get_rate_limit(env: Env) -> u32 {
-        env.storage()
-            .instance()
-            .get(&DataKey::RateLimit)
-            .unwrap_or(RATE_LIMIT_LEDGERS_DEFAULT)
         env.storage()
             .instance()
             .get(&DataKey::RateLimit)
@@ -831,12 +802,6 @@ impl ReputationContract {
             .get(&DataKey::DecayRate)
             .unwrap_or(0);
 
-        let decay_rate: u32 = env
-            .storage()
-            .instance()
-            .get(&DataKey::DecayRate)
-            .unwrap_or(0);
-
         let initial_weight = if review.stake_weight > 0 {
             review.stake_weight
         } else {
@@ -877,8 +842,6 @@ impl ReputationContract {
 
 
         for review in reviews.iter() {
-            let effective_weight =
-                Self::get_effective_weight(env.clone(), review.clone(), current_time);
             let effective_weight =
                 Self::get_effective_weight(env.clone(), review.clone(), current_time);
             let weight = if effective_weight > 0 {

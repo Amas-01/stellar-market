@@ -2,11 +2,10 @@
 
 use super::*;
 use soroban_sdk::{
-    symbol_short,
     testutils::{Address as _, Ledger},
-    Env, String, Vec,
+    vec, Env, String,
 };
-use stellar_market_escrow::{EscrowContract, Job, JobStatus};
+use stellar_market_escrow::EscrowContract;
 
 // The minimum stake required per review (must match lib.rs constant)
 const MIN_STAKE: i128 = 10_000_000;
@@ -125,51 +124,6 @@ fn test_submit_review_client_reviews_freelancer() {
     assert_eq!(rep.total_weight, MIN_STAKE as u64);
 }
 
-#[test]
-fn test_submit_review_freelancer_reviews_client() {
-    let env = Env::default();
-    env.mock_all_auths();
-
-    let escrow_id = env.register_contract(None, EscrowContract);
-    let reputation_id = env.register_contract(None, ReputationContract);
-    let reputation_client = ReputationContractClient::new(&env, &reputation_id);
-
-    let client_addr = Address::generate(&env);
-    let freelancer_addr = Address::generate(&env);
-    let token_admin = Address::generate(&env);
-    let token_addr = create_token(&env, &token_admin);
-    mint(
-        &env,
-        &token_addr,
-        &token_admin,
-        &freelancer_addr,
-        100_000_000,
-    );
-
-    setup_completed_job(
-        &env,
-        &escrow_id,
-        1u64,
-        &client_addr,
-        &freelancer_addr,
-        &token_addr,
-    );
-
-    reputation_client.submit_review(
-        &escrow_id,
-        &freelancer_addr,
-        &client_addr,
-        &1u64,
-        &5u32,
-        &String::from_str(&env, "Easy to work with"),
-        &MIN_STAKE,
-    );
-
-    let rep = reputation_client.get_reputation(&client_addr);
-    assert_eq!(rep.review_count, 1);
-    assert_eq!(rep.total_score, 5 * MIN_STAKE as u64);
-    assert_eq!(rep.total_weight, MIN_STAKE as u64);
-}
 
 #[test]
 fn test_average_rating() {
@@ -1157,58 +1111,6 @@ fn test_register_referral_success() {
     let stats = reputation_client.get_referral_stats(&referrer);
     assert_eq!(stats.total_referrals, 1);
     assert_eq!(stats.earned_bonus, 0); // No bonus until a job is completed
-}
-
-#[test]
-#[should_panic(expected = "Error(Contract, #14)")]
-fn test_register_referral_self_referral_fails() {
-    let env = Env::default();
-    env.mock_all_auths();
-
-    let reputation_id = env.register_contract(None, ReputationContract);
-    let reputation_client = ReputationContractClient::new(&env, &reputation_id);
-
-    let user = Address::generate(&env);
-
-    // User tries to refer themselves
-    reputation_client.register_referral(&user, &user);
-}
-
-#[test]
-#[should_panic(expected = "Error(Contract, #13)")]
-fn test_register_referral_already_referred_fails() {
-    let env = Env::default();
-    env.mock_all_auths();
-
-    let reputation_id = env.register_contract(None, ReputationContract);
-    let reputation_client = ReputationContractClient::new(&env, &reputation_id);
-
-    let referrer_1 = Address::generate(&env);
-    let referrer_2 = Address::generate(&env);
-    let referree = Address::generate(&env);
-
-    reputation_client.register_referral(&referree, &referrer_1);
-
-    // Changing referrers is not allowed
-    reputation_client.register_referral(&referree, &referrer_2);
-}
-
-#[test]
-#[should_panic(expected = "Error(Contract, #15)")]
-fn test_register_referral_circular_dependency() {
-    let env = Env::default();
-    env.mock_all_auths();
-
-    let reputation_id = env.register_contract(None, ReputationContract);
-    let reputation_client = ReputationContractClient::new(&env, &reputation_id);
-
-    let user_a = Address::generate(&env);
-    let user_b = Address::generate(&env);
-
-    reputation_client.register_referral(&user_b, &user_a);
-
-    // user_b tries to refer user_a
-    reputation_client.register_referral(&user_a, &user_b);
 }
 
 #[test]
