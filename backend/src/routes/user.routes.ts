@@ -11,6 +11,7 @@ import {
   getUserJobsQuerySchema,
 } from "../schemas";
 import { avatarUpload } from "../config/upload";
+import { cache, invalidateCacheKey, generateUserCacheKey } from "../lib/cache";
 
 const router = Router();
 const prisma = new PrismaClient();
@@ -130,6 +131,11 @@ router.put("/me", authenticate, async (req: AuthRequest, res: Response) => {
       },
     });
 
+    // Invalidate user profile cache
+    if (req.userId) {
+      await invalidateCacheKey(generateUserCacheKey(req.userId));
+    }
+
     res.json(updatedUser);
   } catch (error) {
     console.error("Update profile error:", error);
@@ -217,6 +223,7 @@ router.get(
   validate({ params: getUserByIdParamSchema }),
   asyncHandler(async (req: AuthRequest, res: Response) => {
     const id = req.params.id as string;
+    const cacheKey = generateUserCacheKey(id);
 
     const user = await prisma.user.findUnique({
       where: { id },
@@ -235,38 +242,69 @@ router.get(
                 id: true,
                 username: true,
                 avatarUrl: true,
+    try {
+      // Cache for 5 minutes (300 seconds)
+      const { data, hit } = await cache(cacheKey, 300, async () => {
+        const user = await prisma.user.findUnique({
+          where: { id },
+          select: {
+            id: true,
+            username: true,
+            walletAddress: true,
+            bio: true,
+            avatarUrl: true,
+            role: true,
+            createdAt: true,
+            reviewsReceived: {
+              include: {
+                reviewer: {
+                  select: {
+                    id: true,
+                    username: true,
+                    avatarUrl: true,
+                  },
+                },
               },
+              orderBy: { createdAt: "desc" },
+            },
+            clientJobs: {
+              where: { status: "COMPLETED" },
+              orderBy: { updatedAt: "desc" },
+            },
+            freelancerJobs: {
+              where: { status: "COMPLETED" },
+              orderBy: { updatedAt: "desc" },
             },
           },
-          orderBy: { createdAt: "desc" },
-        },
-        clientJobs: {
-          where: { status: "COMPLETED" },
-          orderBy: { updatedAt: "desc" },
-        },
-        freelancerJobs: {
-          where: { status: "COMPLETED" },
-          orderBy: { updatedAt: "desc" },
-        },
-      },
-    });
+        });
 
-    if (!user) {
-      return res.status(404).json({ error: "User not found." });
+        if (!user) {
+          throw new Error("User not found");
+        }
+
+        // Calculate aggregate rating
+        const ratings: number[] = user.reviewsReceived.map((r: any) => r.rating);
+        const averageRating =
+          ratings.length > 0
+            ? ratings.reduce((a: number, b: number) => a + b, 0) / ratings.length
+            : 0;
+
+        return {
+          ...user,
+          averageRating: parseFloat(averageRating.toFixed(1)),
+          reviewCount: ratings.length,
+        };
+      });
+
+      // Add cache hit status to response headers for debugging
+      res.set('X-Cache-Hit', hit.toString());
+      res.json(data);
+    } catch (error) {
+      if (error instanceof Error && error.message === "User not found") {
+        return res.status(404).json({ error: "User not found." });
+      }
+      throw error;
     }
-
-    // Calculate aggregate rating
-    const ratings: number[] = user.reviewsReceived.map((r: any) => r.rating);
-    const averageRating =
-      ratings.length > 0
-        ? ratings.reduce((a: number, b: number) => a + b, 0) / ratings.length
-        : 0;
-
-    res.json({
-      ...user,
-      averageRating: parseFloat(averageRating.toFixed(1)),
-      reviewCount: ratings.length,
-    });
   }),
 );
 
@@ -368,6 +406,9 @@ router.put(
         createdAt: true,
       },
     });
+
+    // Invalidate user profile cache
+    await invalidateCacheKey(generateUserCacheKey(id));
 
     res.json(user);
   }),
