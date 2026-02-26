@@ -32,6 +32,19 @@ export default function SettingsPage() {
   const [isSaving, setIsSaving] = useState(false);
   const [isPageLoading, setIsPageLoading] = useState(true);
 
+  // ─── 2FA State ──────────────────────────────────────────────────────────────
+  const [twoFAEnabled, setTwoFAEnabled] = useState(false);
+  const [twoFASetupData, setTwoFASetupData] = useState<{
+    qrCode: string;
+    secret: string;
+    backupCodes: string[];
+  } | null>(null);
+  const [verifyCode, setVerifyCode] = useState("");
+  const [disablePassword, setDisablePassword] = useState("");
+  const [showDisableModal, setShowDisableModal] = useState(false);
+  const [twoFALoading, setTwoFALoading] = useState(false);
+  const [copiedBackup, setCopiedBackup] = useState(false);
+
   // Redirect if not authenticated
   useEffect(() => {
     if (!authLoading && !token) {
@@ -54,6 +67,7 @@ export default function SettingsPage() {
         setBio(data.bio || "");
         setAvatarUrl(data.avatarUrl || "");
         setRole(data.role || "FREELANCER");
+        setTwoFAEnabled(data.twoFactorEnabled || false);
       } catch {
         toast.error("Failed to load profile data.");
       } finally {
@@ -134,35 +148,6 @@ export default function SettingsPage() {
       </div>
     );
   }
-
-  // ─── 2FA State ──────────────────────────────────────────────────────────────
-  const [twoFAEnabled, setTwoFAEnabled] = useState(false);
-  const [twoFASetupData, setTwoFASetupData] = useState<{
-    qrCode: string;
-    secret: string;
-    backupCodes: string[];
-  } | null>(null);
-  const [verifyCode, setVerifyCode] = useState("");
-  const [disablePassword, setDisablePassword] = useState("");
-  const [showDisableModal, setShowDisableModal] = useState(false);
-  const [twoFALoading, setTwoFALoading] = useState(false);
-  const [copiedBackup, setCopiedBackup] = useState(false);
-
-  // Fetch 2FA status along with profile
-  useEffect(() => {
-    if (!token) return;
-    async function fetch2FAStatus() {
-      try {
-        const res = await axios.get(`${API_URL}/users/me`, {
-          headers: { Authorization: `Bearer ${token}` },
-        });
-        setTwoFAEnabled(res.data.twoFactorEnabled || false);
-      } catch {
-        // Profile fetch already handles errors
-      }
-    }
-    fetch2FAStatus();
-  }, [token]);
 
   async function handleSetup2FA() {
     setTwoFALoading(true);
