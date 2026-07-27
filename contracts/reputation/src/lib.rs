@@ -2282,6 +2282,22 @@ impl ReputationContract {
             env.storage().persistent().remove(&review_exists_key);
         }
 
+        // Resolve any pending appeal on the removed review so both removal
+        // paths (admin_remove_review and admin_resolve_appeal) leave
+        // consistent appeal state (#981).
+        let appeal_key = DataKey::ReviewAppeal(reviewer.clone(), user.clone(), job_id);
+        if let Some(mut appeal) = env
+            .storage()
+            .persistent()
+            .get::<DataKey, ReviewAppeal>(&appeal_key)
+        {
+            if appeal.status == AppealStatus::Pending {
+                appeal.status = AppealStatus::ReviewRemoved;
+                env.storage().persistent().set(&appeal_key, &appeal);
+                bump_review_appeal_ttl(&env, &reviewer, &user, job_id);
+            }
+        }
+
         // Do NOT update legacy accumulators here; recomputation is lazy on next read.
 
         // NOTE: Soroban symbol literals have a hard 9-character limit.
@@ -2729,5 +2745,76 @@ mod tests {
 
         // Call without being a registered signer — should panic with NotAdmin
         client.admin_remove_review(&non_admin, &reviewee, &0);
+    }
+
+    // ── Issue #981: admin_remove_review resolves pending appeal ─────────────
+
+    #[test]
+    fn test_admin_remove_review_resolves_pending_appeal() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let contract_id = env.register_contract(None, ReputationContract);
+        let client = ReputationContractClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        client.initialize(&vec![&env, admin.clone()], &1, &0);
+
+        let reviewer = Address::generate(&env);
+        let reviewee = Address::generate(&env);
+        seed_review_state(&env, &contract_id, &reviewer, &reviewee, 42, 1);
+
+        client.appeal_review(
+            &reviewer,
+            &reviewee,
+            &42,
+            &String::from_str(&env, "flagged review"),
+        );
+        let appeal = client.get_review_appeal(&reviewer, &reviewee, &42);
+        assert_eq!(appeal.status, AppealStatus::Pending);
+
+        // Admin removes the review directly (not via admin_resolve_appeal).
+        client.admin_remove_review(&admin, &reviewee, &0);
+
+        let resolved = client.get_review_appeal(&reviewer, &reviewee, &42);
+        assert_eq!(resolved.status, AppealStatus::ReviewRemoved);
+        assert_eq!(client.get_reviews(&reviewee).len(), 0);
+    }
+
+    #[test]
+    fn test_admin_resolve_appeal_after_admin_remove_review_succeeds() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let contract_id = env.register_contract(None, ReputationContract);
+        let client = ReputationContractClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        client.initialize(&vec![&env, admin.clone()], &1, &0);
+
+        let reviewer = Address::generate(&env);
+        let reviewee = Address::generate(&env);
+        seed_review_state(&env, &contract_id, &reviewer, &reviewee, 42, 1);
+
+        client.appeal_review(
+            &reviewer,
+            &reviewee,
+            &42,
+            &String::from_str(&env, "flagged review"),
+        );
+
+        // admin_remove_review resolves the appeal as ReviewRemoved.
+        client.admin_remove_review(&admin, &reviewee, &0);
+
+        // Calling admin_resolve_appeal should fail with AppealAlreadyResolved
+        // (not ReviewNotFound, which was the previous bug).
+        let result = client.try_admin_resolve_appeal(
+            &admin,
+            &reviewer,
+            &reviewee,
+            &42,
+            &true,
+        );
+        assert!(result.is_err());
     }
 }
