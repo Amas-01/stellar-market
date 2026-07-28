@@ -179,14 +179,32 @@ export default function ReviewModal({
                 role="radiogroup"
                 aria-label="Star rating"
                 aria-required="true"
+                onKeyDown={(e) => {
+                  if (e.key !== "ArrowLeft" && e.key !== "ArrowRight") return;
+                  e.preventDefault();
+                  const current = rating || 1;
+                  const next =
+                    e.key === "ArrowRight"
+                      ? Math.min(current + 1, 5)
+                      : Math.max(current - 1, 1);
+                  setRating(next);
+                  setError(null);
+                  (
+                    e.currentTarget.querySelector(
+                      `[data-star="${next}"]`,
+                    ) as HTMLButtonElement | null
+                  )?.focus();
+                }}
               >
                 {[1, 2, 3, 4, 5].map((star) => (
                   <button
                     key={star}
+                    data-star={star}
                     type="button"
                     role="radio"
                     aria-checked={rating === star}
                     aria-label={`${star} star${star > 1 ? "s" : ""} — ${ratingLabels[star]}`}
+                    tabIndex={star === (rating || 1) ? 0 : -1}
                     onClick={() => {
                       setRating(star);
                       setError(null);

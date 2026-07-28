@@ -14,6 +14,7 @@ import { NotificationService } from "./notification.service";
 import { ContractService } from "./contract.service";
 import { logger } from "../lib/logger";
 import { recordDisputeEvent } from "./dispute-event.service";
+import { ReputationCacheService } from "./reputation-cache.service";
 
 const prisma = new PrismaClient();
 
@@ -764,6 +765,18 @@ export class DisputeService {
     await recordDisputeEvent(disputeId, DisputeEventType.VERDICT_REACHED, {
       outcome,
     });
+
+    // Invalidate reputation cache for both parties (dispute outcome affects reputation)
+    if (updatedDispute.client?.walletAddress) {
+      await ReputationCacheService.invalidateCache(
+        updatedDispute.client.walletAddress,
+      );
+    }
+    if (updatedDispute.freelancer?.walletAddress) {
+      await ReputationCacheService.invalidateCache(
+        updatedDispute.freelancer.walletAddress,
+      );
+    }
 
     return updatedDispute;
   }
