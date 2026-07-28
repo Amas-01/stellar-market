@@ -3819,7 +3819,18 @@ impl EscrowContract {
         job.client.require_auth();
         job.freelancer.require_auth();
 
+        // Reject calls on jobs that have already reached a terminal state
+        // (Completed, Cancelled, or Expired).  These are the same guard used by
+        // propose_revision and submit_milestone.
+        require_state_not_terminal(&job)?;
+
         if new_deadline <= env.ledger().timestamp() {
+            return Err(EscrowError::InvalidDeadline);
+        }
+
+        // The milestone deadline must never exceed the job's overall deadline —
+        // the same invariant enforced during create_job.
+        if new_deadline > job.job_deadline {
             return Err(EscrowError::InvalidDeadline);
         }
 
