@@ -17,6 +17,7 @@ import { initYjsServer } from "./socket/yjsServer";
 import { startExpiryJob } from "./jobs/expiry.job";
 import { startPendingTxJob } from "./jobs/pending-tx.job";
 import { startEscrowTtlJob } from "./jobs/escrow-ttl.job";
+import { startEvidenceSessionCleanupJob } from "./jobs/evidence-session-cleanup.job";
 import {
   startHorizonListener,
   stopHorizonListener,
@@ -227,6 +228,7 @@ async function startServer(): Promise<void> {
     startExpiryJob();
     startPendingTxJob();
     startEscrowTtlJob();
+    startEvidenceSessionCleanupJob();
     startHorizonListener();
     RecommendationQueueService.startWorker();
     AuditService.startWorker();
