@@ -2428,6 +2428,55 @@ fn test_approve_milestones_batch_non_existent_index() {
     assert!(result.is_err());
 }
 
+#[test]
+fn test_approve_milestones_batch_rejects_duplicate_indices() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().with_mut(|l| l.timestamp = 1000);
+
+    let contract_id = env.register_contract(None, EscrowContract);
+    let escrow = EscrowContractClient::new(&env, &contract_id);
+
+    let admin = Address::generate(&env);
+    let token = env.register_stellar_asset_contract_v2(admin.clone()).address();
+    let client = Address::generate(&env);
+    let freelancer = Address::generate(&env);
+
+    let m0: i128 = 1000;
+
+    let milestones = vec![
+        &env,
+        (String::from_str(&env, "Task 1"), m0, 2000_u64),
+    ];
+
+    let job_id = escrow.create_job(
+        &client,
+        &freelancer,
+        &token,
+        &milestones,
+        &5000_u64,
+        &GRACE_PERIOD,
+        &DEFAULT_EXPIRY_LEDGER,
+    );
+
+    mint_tokens(&env, &token, &client, m0);
+    escrow.fund_job(&job_id, &client, &0, &0);
+
+    escrow.submit_milestone(&job_id, &0, &freelancer);
+
+    // Duplicate index — should be rejected without mutating any state.
+    let indices = vec![&env, 0_u32, 0_u32];
+    let result = escrow.try_approve_milestones_batch(&job_id, &indices, &client);
+    assert_eq!(
+        result,
+        Err(Ok(EscrowError::InvalidMilestoneIndex))
+    );
+
+    // Milestone must remain Submitted since the call reverted before any mutation.
+    let job = escrow.get_job(&job_id);
+    assert_eq!(job.milestones.get(0).unwrap().status, MilestoneStatus::Submitted);
+}
+
 // ── Protocol Fee and Treasury Tests ───────────────────────────────────────────
 
 #[test]

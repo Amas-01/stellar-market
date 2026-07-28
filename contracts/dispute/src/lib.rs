@@ -2120,6 +2120,8 @@ impl DisputeContract {
     /// Permissionless and idempotent: safe to call repeatedly until escrow accepts.
     /// Returns the current dispute status so callers can see whether the retry succeeded.
     pub fn retry_escrow_callback(env: Env, dispute_id: u64) -> Result<DisputeStatus, DisputeError> {
+        require_not_paused(&env)?;
+
         let mut dispute: Dispute = env
             .storage()
             .persistent()

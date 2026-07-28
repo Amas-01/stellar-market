@@ -9,6 +9,7 @@ import Image from "next/image";
 import { useAuth } from "@/context/AuthContext";
 import { useDelay } from "@/hooks/useDelay";
 import MessageSkeleton from "@/components/skeletons/MessageSkeleton";
+import Avatar from "@/components/Avatar";
 
 export default function InboxPage() {
   const { token } = useAuth();
@@ -86,17 +87,12 @@ export default function InboxPage() {
           filteredConversations.map((conv) => (
             <Link key={conv.id} href={`/messages/${conv.id}`}>
               <div className="card hover:border-stellar-blue/30 transition-all group flex items-start gap-4 cursor-pointer relative">
-                <div className="w-12 h-12 rounded-full bg-gradient-to-br from-stellar-blue to-stellar-purple flex-shrink-0 flex items-center justify-center text-white font-bold overflow-hidden border border-theme-border">
-                  {conv.otherUser.avatarUrl ? (
-                    <Image
-                      src={conv.otherUser.avatarUrl}
-                      alt={conv.otherUser.username}
-                      className="w-full h-full object-cover"
-                    />
-                  ) : (
-                    <User size={24} className="text-white/50" />
-                  )}
-                </div>
+                <Avatar
+                  src={conv.otherUser.avatarUrl}
+                  alt={conv.otherUser.username}
+                  size={48}
+                  className="flex-shrink-0 border border-theme-border"
+                />
 
                 <div className="flex-1 min-w-0">
                   <div className="flex justify-between items-start mb-1">

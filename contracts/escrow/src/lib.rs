@@ -2144,15 +2144,27 @@ impl EscrowContract {
         // STATE VALIDATION: Cannot approve milestones while disputed
         require_state_not_disputed(&job)?;
 
-        // Validate all milestone indices before making any state changes
+        // Validate all milestone indices before making any state changes.
+        // Duplicate indices are rejected here so a repeated index can't be
+        // counted (and its amount summed into total_released) more than once
+        // while only transitioning to Approved a single time.
         let mut milestones = job.milestones.clone();
         let mut total_released: i128 = 0;
+        let mut seen = [false; MAX_MILESTONES as usize];
 
         for i in milestone_indices.iter() {
             let index = i;
             let milestone = milestones
                 .get(index)
                 .ok_or(EscrowError::MilestoneNotFound)?;
+
+            // Safe: milestones.len() <= MAX_MILESTONES, and the get() above
+            // already confirmed index < milestones.len().
+            let idx = index as usize;
+            if seen[idx] {
+                return Err(EscrowError::InvalidMilestoneIndex);
+            }
+            seen[idx] = true;
 
             if milestone.status != MilestoneStatus::Submitted {
                 return Err(EscrowError::InvalidStatus);
