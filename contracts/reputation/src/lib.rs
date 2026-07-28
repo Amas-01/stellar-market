@@ -598,8 +598,10 @@ impl ReputationContract {
             .persistent()
             .extend_ttl(&balance_key, MIN_TTL_THRESHOLD, MIN_TTL_EXTEND_TO);
 
+        // Saturate stake_weight to u64::MAX instead of truncating to prevent
+        // large i128 stakes from wrapping to arbitrary values (issue #982).
         let weight = if stake_weight > 0 {
-            stake_weight as u64
+            i128::min(stake_weight, u64::MAX as i128) as u64
         } else {
             1u64
         };
@@ -1725,7 +1727,9 @@ impl ReputationContract {
 
         for review in reviews.iter() {
             let factor = get_decay_factor(decay_rate, current_ts, review.timestamp);
-            let decayed_weight = (review.stake_weight as u64 * factor) / 100;
+            // Saturate stake_weight to u64::MAX to prevent truncation (issue #982)
+            let clamped_weight = i128::min(review.stake_weight, u64::MAX as i128) as u64;
+            let decayed_weight = (clamped_weight * factor) / 100;
             total_score += (review.rating as u64) * decayed_weight;
             total_weight += decayed_weight;
         }
