@@ -17,7 +17,6 @@ import { config } from "../config";
 const ALGORITHM_GCM = "aes-256-gcm";
 const ALGORITHM_CBC = "aes-256-cbc"; // kept for backward-compatible reads only
 const GCM_IV_BYTES = 12; // 96-bit IV recommended for GCM
-const GCM_TAG_BYTES = 16;
 
 function getKey(): Buffer {
   return Buffer.from(config.encryptionKey, "hex");

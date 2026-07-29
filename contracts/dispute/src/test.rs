@@ -3246,9 +3246,10 @@ fn test_appeal_tie_break_respects_method() {
     let assigned = client.get_assigned_arbitrators(&dispute_id);
     client.cast_vote(&dispute_id, &assigned.get(0).unwrap(), &VoteChoice::Client, &String::from_str(&env, "C1"), &0u64);
     client.cast_vote(&dispute_id, &assigned.get(1).unwrap(), &VoteChoice::Client, &String::from_str(&env, "C2"), &0u64);
+    // The third unanimous "Client" vote reaches AUTO_RESOLVE_VOTE_THRESHOLD, so
+    // cast_vote auto-resolves the dispute internally — no explicit resolve_dispute
+    // call is needed (and one would fail with AlreadyResolved).
     client.cast_vote(&dispute_id, &assigned.get(2).unwrap(), &VoteChoice::Client, &String::from_str(&env, "C3"), &0u64);
-
-    let _ = client.resolve_dispute(&dispute_id);
 
     let appeal_id = client.appeal(&dispute_id, &freelancer);
     

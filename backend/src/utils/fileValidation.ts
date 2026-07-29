@@ -55,6 +55,10 @@ export async function validateFileMimeType(
       return { valid: false, error: "Declared MIME type does not match actual file content" };
     }
 
+    if (!ALLOWED_MIME_TYPES.includes(detectedType)) {
+      return { valid: false, error: "Detected file type is not an allowed MIME type" };
+    }
+
     return {
       valid: true,
       detectedType,

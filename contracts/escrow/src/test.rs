@@ -834,7 +834,7 @@ fn test_client_can_propose_revision() {
             description: String::from_str(&env, "New Phase 1"),
             amount: m0_amount,
             status: MilestoneStatus::Pending,
-            deadline: JOB_DEADLINE,
+            deadline: JOB_DEADLINE - 1,
                 token: None,
         },
         Milestone {
@@ -1432,7 +1432,7 @@ fn test_propose_revision_new_total_equals_sum_of_milestones() {
             description: String::from_str(&env, "M1"),
             amount: m0,
             status: MilestoneStatus::Pending,
-            deadline: JOB_DEADLINE,
+            deadline: JOB_DEADLINE - 1,
                 token: None,
         },
         Milestone {
@@ -1474,7 +1474,7 @@ fn test_accept_revision_same_total_updates_milestones_only() {
             description: String::from_str(&env, "Split 1"),
             amount: half,
             status: MilestoneStatus::Pending,
-            deadline: JOB_DEADLINE,
+            deadline: JOB_DEADLINE - 1,
                 token: None,
         },
         Milestone {

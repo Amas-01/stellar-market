@@ -1,6 +1,5 @@
 import { PrismaClient, EscrowEventType, JobStatus, EscrowStatus } from "@prisma/client";
 import { handleEscrowEvent } from "../services/escrow-projection.service";
-import { NotificationService } from "../services/notification.service";
 import net from "net";
 
 jest.mock("../services/notification.service", () => ({
