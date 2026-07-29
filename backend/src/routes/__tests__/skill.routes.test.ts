@@ -1,8 +1,12 @@
 import request from "supertest";
 import express from "express";
 
+type MockPrismaClient = {
+  skill: { findMany: jest.Mock };
+};
+
 jest.mock("@prisma/client", () => {
-  const mockPrisma = {
+  const mockPrisma: MockPrismaClient = {
     skill: { findMany: jest.fn() },
   };
   return { PrismaClient: jest.fn(() => mockPrisma) };
@@ -11,7 +15,7 @@ jest.mock("@prisma/client", () => {
 import { PrismaClient } from "@prisma/client";
 import skillRouter from "../skill.routes";
 
-const prismaMock = new PrismaClient() as any;
+const prismaMock = new PrismaClient() as unknown as MockPrismaClient;
 
 const app = express();
 app.use(express.json());
