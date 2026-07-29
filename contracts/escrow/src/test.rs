@@ -858,6 +858,115 @@ fn test_client_can_propose_revision() {
 }
 
 #[test]
+fn test_propose_revision_rejects_non_positive_milestone_amount() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (contract, client, freelancer, token, admin) = setup_test(&env);
+
+    let milestones = vec![&env, (String::from_str(&env, "Initial"), 1000_i128, JOB_DEADLINE)];
+    let job_id = contract.create_job(&client, &freelancer, &token, &milestones, &JOB_DEADLINE, &GRACE_PERIOD, &DEFAULT_EXPIRY_LEDGER);
+
+    let invalid_milestones = vec![
+        &env,
+        Milestone {
+            id: 0,
+            description: String::from_str(&env, "Invalid"),
+            amount: 0,
+            status: MilestoneStatus::Pending,
+            deadline: JOB_DEADLINE,
+            token: None,
+        },
+    ];
+
+    let result = contract.try_propose_revision(&client, &job_id, &invalid_milestones);
+    assert_eq!(result, Err(Ok(EscrowError::InvalidMilestone)));
+}
+
+#[test]
+fn test_propose_revision_rejects_past_deadline() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().with_mut(|l| l.timestamp = 1000);
+    let (contract, client, freelancer, token, admin) = setup_test(&env);
+
+    let milestones = vec![&env, (String::from_str(&env, "Initial"), 1000_i128, JOB_DEADLINE)];
+    let job_id = contract.create_job(&client, &freelancer, &token, &milestones, &JOB_DEADLINE, &GRACE_PERIOD, &DEFAULT_EXPIRY_LEDGER);
+
+    let invalid_milestones = vec![
+        &env,
+        Milestone {
+            id: 0,
+            description: String::from_str(&env, "Invalid"),
+            amount: 1200,
+            status: MilestoneStatus::Pending,
+            deadline: 1000,
+            token: None,
+        },
+    ];
+
+    let result = contract.try_propose_revision(&client, &job_id, &invalid_milestones);
+    assert_eq!(result, Err(Ok(EscrowError::MilestoneDeadlineInPast)));
+}
+
+#[test]
+fn test_propose_revision_rejects_deadline_after_job_deadline() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (contract, client, freelancer, token, admin) = setup_test(&env);
+
+    let milestones = vec![&env, (String::from_str(&env, "Initial"), 1000_i128, JOB_DEADLINE)];
+    let job_id = contract.create_job(&client, &freelancer, &token, &milestones, &JOB_DEADLINE, &GRACE_PERIOD, &DEFAULT_EXPIRY_LEDGER);
+
+    let invalid_milestones = vec![
+        &env,
+        Milestone {
+            id: 0,
+            description: String::from_str(&env, "Invalid"),
+            amount: 1200,
+            status: MilestoneStatus::Pending,
+            deadline: JOB_DEADLINE + 1,
+            token: None,
+        },
+    ];
+
+    let result = contract.try_propose_revision(&client, &job_id, &invalid_milestones);
+    assert_eq!(result, Err(Ok(EscrowError::InvalidDeadline)));
+}
+
+#[test]
+fn test_propose_revision_rejects_non_increasing_deadlines() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (contract, client, freelancer, token, admin) = setup_test(&env);
+
+    let milestones = vec![&env, (String::from_str(&env, "Initial"), 1000_i128, JOB_DEADLINE)];
+    let job_id = contract.create_job(&client, &freelancer, &token, &milestones, &JOB_DEADLINE, &GRACE_PERIOD, &DEFAULT_EXPIRY_LEDGER);
+
+    let invalid_milestones = vec![
+        &env,
+        Milestone {
+            id: 0,
+            description: String::from_str(&env, "First"),
+            amount: 500,
+            status: MilestoneStatus::Pending,
+            deadline: JOB_DEADLINE - 100,
+            token: None,
+        },
+        Milestone {
+            id: 1,
+            description: String::from_str(&env, "Second"),
+            amount: 700,
+            status: MilestoneStatus::Pending,
+            deadline: JOB_DEADLINE - 100,
+            token: None,
+        },
+    ];
+
+    let result = contract.try_propose_revision(&client, &job_id, &invalid_milestones);
+    assert_eq!(result, Err(Ok(EscrowError::MilestoneDeadlinesNotOrdered)));
+}
+
+#[test]
 fn test_freelancer_can_propose_revision() {
     let env = Env::default();
     env.mock_all_auths();

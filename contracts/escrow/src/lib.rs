@@ -3210,6 +3210,24 @@ impl EscrowContract {
             return Err(EscrowError::TooManyMilestones);
         }
 
+        let current_timestamp = env.ledger().timestamp();
+        let mut prev_deadline: u64 = 0;
+        for (i, milestone) in new_milestones.iter().enumerate() {
+            if milestone.amount <= 0 {
+                return Err(EscrowError::InvalidMilestone);
+            }
+            if milestone.deadline <= current_timestamp {
+                return Err(EscrowError::MilestoneDeadlineInPast);
+            }
+            if milestone.deadline > job.job_deadline {
+                return Err(EscrowError::InvalidDeadline);
+            }
+            if i > 0 && milestone.deadline <= prev_deadline {
+                return Err(EscrowError::MilestoneDeadlinesNotOrdered);
+            }
+            prev_deadline = milestone.deadline;
+        }
+
         // 5. Compute new_total as the sum of all milestone amounts
         // Use checked arithmetic — no overflow permitted
         let new_total: i128 = new_milestones
