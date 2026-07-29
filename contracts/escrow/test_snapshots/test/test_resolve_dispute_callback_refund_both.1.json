@@ -98,9 +98,6 @@
                 },
                 {
                   "u64": 604800
-                },
-                {
-                  "u32": 518400
                 }
               ]
             }
@@ -148,15 +145,6 @@
                 },
                 {
                   "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAITA4"
-                },
-                {
-                  "i128": {
-                    "hi": 0,
-                    "lo": 0
-                  }
-                },
-                {
-                  "u32": 0
                 }
               ]
             }
@@ -316,14 +304,6 @@
                       },
                       "val": {
                         "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAITA4"
-                      }
-                    },
-                    {
-                      "key": {
-                        "symbol": "expiry_ledger"
-                      },
-                      "val": {
-                        "u32": 518400
                       }
                     },
                     {
@@ -586,7 +566,7 @@
             },
             "ext": "v0"
           },
-          535000
+          6311999
         ]
       ],
       [
@@ -1294,9 +1274,6 @@
                 },
                 {
                   "u64": 604800
-                },
-                {
-                  "u32": 518400
                 }
               ]
             }
@@ -1484,15 +1461,6 @@
                 },
                 {
                   "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAITA4"
-                },
-                {
-                  "i128": {
-                    "hi": 0,
-                    "lo": 0
-                  }
-                },
-                {
-                  "u32": 0
                 }
               ]
             }
@@ -1998,14 +1966,6 @@
                   },
                   "val": {
                     "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAITA4"
-                  }
-                },
-                {
-                  "key": {
-                    "symbol": "expiry_ledger"
-                  },
-                  "val": {
-                    "u32": 518400
                   }
                 },
                 {

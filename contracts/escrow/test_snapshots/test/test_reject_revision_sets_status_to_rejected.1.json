@@ -92,9 +92,6 @@
                 },
                 {
                   "u64": 604800
-                },
-                {
-                  "u32": 518400
                 }
               ]
             }
@@ -337,14 +334,6 @@
                     },
                     {
                       "key": {
-                        "symbol": "expiry_ledger"
-                      },
-                      "val": {
-                        "u32": 518400
-                      }
-                    },
-                    {
-                      "key": {
                         "symbol": "freelancer"
                       },
                       "val": {
@@ -489,7 +478,7 @@
             },
             "ext": "v0"
           },
-          535000
+          6311999
         ]
       ],
       [
@@ -640,7 +629,7 @@
             },
             "ext": "v0"
           },
-          518400
+          6311999
         ]
       ],
       [
@@ -1439,9 +1428,6 @@
                 },
                 {
                   "u64": 604800
-                },
-                {
-                  "u32": 518400
                 }
               ]
             }
@@ -1968,14 +1954,6 @@
                   },
                   "val": {
                     "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAFCT4"
-                  }
-                },
-                {
-                  "key": {
-                    "symbol": "expiry_ledger"
-                  },
-                  "val": {
-                    "u32": 518400
                   }
                 },
                 {

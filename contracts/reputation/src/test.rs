@@ -34,7 +34,6 @@ fn setup_completed_job(
         env,
         (String::from_str(env, "Task"), 100_i128, 9999999999u64),
     ];
-    let expiry = env.ledger().sequence() + 518_400;
     let job_id = escrow_client.create_job(
         client,
         freelancer,
@@ -42,11 +41,10 @@ fn setup_completed_job(
         &milestones,
         &9999999999u64,
         &86400u64,
-        &expiry,
     );
 
     // Fund the job
-    escrow_client.fund_job(&job_id, client, &0, &0);
+    escrow_client.fund_job(&job_id, client);
 
     // Mark the job as completed using the dispute resolution callback
     escrow_client.resolve_dispute_callback(&job_id, &stellar_market_escrow::DisputeResolution::FreelancerWins);
@@ -69,7 +67,6 @@ fn setup_in_progress_job(
         env,
         (String::from_str(env, "Task"), 100_i128, 9999999999u64),
     ];
-    let expiry = env.ledger().sequence() + 518_400;
     let job_id = escrow_client.create_job(
         client,
         freelancer,
@@ -77,11 +74,10 @@ fn setup_in_progress_job(
         &milestones,
         &9999999999u64,
         &86400u64,
-        &expiry,
     );
 
     // Fund the job to move it to Funded status
-    escrow_client.fund_job(&job_id, client, &0, &0);
+    escrow_client.fund_job(&job_id, client);
 }
 
 fn create_token(env: &Env, admin: &Address) -> Address {
