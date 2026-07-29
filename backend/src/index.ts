@@ -22,7 +22,7 @@ import {
 } from "./services/horizon-listener.service";
 import { installRequestIdConsolePatch, logger } from "./lib/logger";
 import { getHealthStatus } from "./lib/health";
-import { RecommendationQueueService } from "./services/recommendation-queue.service";
+import { getRecommendationRebuildQueue, RecommendationQueueService } from "./services/recommendation-queue.service";
 import { initializeVirusScanner } from "./utils/virusScanner";
 import { ReputationCacheService } from "./services/reputation-cache.service";
 import { createBullBoard } from "@bull-board/api";
@@ -155,7 +155,10 @@ app.get("/health/db", async (_req, res) => {
 const bullBoardAdapter = new ExpressAdapter();
 bullBoardAdapter.setBasePath("/admin/queues");
 createBullBoard({
-  queues: [new BullMQAdapter(notificationQueue)],
+  queues: [
+    new BullMQAdapter(notificationQueue),
+    new BullMQAdapter(getRecommendationRebuildQueue()),
+  ],
   serverAdapter: bullBoardAdapter,
 });
 app.use("/admin/queues", requireAdmin, bullBoardAdapter.getRouter());
@@ -208,7 +211,7 @@ async function gracefulShutdown(signal: string): Promise<void> {
   logger.info({ signal }, "Shutting down gracefully");
 
   stopHorizonListener();
-  RecommendationQueueService.stopWorker();
+  await RecommendationQueueService.stopWorker();
   ReputationCacheService.stopPeriodicRefresh();
   await stopNotificationWorker();
 

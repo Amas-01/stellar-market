@@ -80,7 +80,7 @@ type PendingOnChainAction = {
   };
 };
 
-export default function JobDetailClient() {
+export default function JobDetailClient({ initialJob }: { initialJob?: Job | null }) {
   const { id } = useParams();
   const { address, balances, signAndBroadcastTransaction } = useWallet();
   const { user } = useAuth();
@@ -88,7 +88,7 @@ export default function JobDetailClient() {
   const queryClient = useQueryClient();
 
   const {
-    data: job = null,
+    data: job = initialJob ?? null,
     isLoading: isJobLoading,
     isFetching: isJobFetching,
     error: jobError
@@ -101,6 +101,7 @@ export default function JobDetailClient() {
       });
       return res.data;
     },
+    initialData: initialJob ?? undefined,
     staleTime: 60_000,
   });
 
