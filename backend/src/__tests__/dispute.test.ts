@@ -1,9 +1,20 @@
 import { DisputeService } from "../services/dispute.service";
 import { ContractService } from "../services/contract.service";
+import { ReputationCacheService } from "../services/reputation-cache.service";
 
 jest.mock("../services/contract.service", () => ({
   ContractService: {
     getOnChainAssignedArbitrators: jest.fn(),
+  },
+}));
+
+jest.mock("../services/dispute-event.service", () => ({
+  recordDisputeEvent: jest.fn().mockResolvedValue({ id: 1 }),
+}));
+
+jest.mock("../services/reputation-cache.service", () => ({
+  ReputationCacheService: {
+    invalidateCache: jest.fn().mockResolvedValue(undefined),
   },
 }));
 
@@ -26,7 +37,7 @@ const JobStatus = {
 
 // ─── Prisma mock ─────────────────────────────────────────────────────────────
 jest.mock("@prisma/client", () => {
-  const mockPrisma = {
+  const mockPrisma: any = {
     user: {
       findUnique: jest.fn(),
       findFirst: jest.fn(),
@@ -46,8 +57,10 @@ jest.mock("@prisma/client", () => {
       create: jest.fn(),
       findUnique: jest.fn(),
       findMany: jest.fn(),
+      count: jest.fn(),
     },
     $disconnect: jest.fn(),
+    $transaction: jest.fn(async (cb: any): Promise<any> => await cb(mockPrisma)),
   };
 
   return {
@@ -70,6 +83,13 @@ jest.mock("@prisma/client", () => {
       COMPLETED: "COMPLETED",
       CANCELLED: "CANCELLED",
       DISPUTED: "DISPUTED",
+    } as any,
+    DisputeEventType: {
+      DISPUTE_OPENED: "DISPUTE_OPENED",
+      EVIDENCE_SUBMITTED: "EVIDENCE_SUBMITTED",
+      ARBITRATOR_ASSIGNED: "ARBITRATOR_ASSIGNED",
+      VOTE_CAST: "VOTE_CAST",
+      VERDICT_REACHED: "VERDICT_REACHED",
     } as any,
   };
 });
@@ -207,6 +227,7 @@ describe("Dispute Management System", () => {
         attachments: [],
       };
       prismaMock.dispute.findUnique.mockResolvedValueOnce(fullDispute);
+      prismaMock.disputeVote.findMany.mockResolvedValueOnce([]);
 
       const dispute = await DisputeService.getDisputeById(disputeId);
 
@@ -233,6 +254,7 @@ describe("Dispute Management System", () => {
         attachments: [],
       };
       prismaMock.dispute.findUnique.mockResolvedValueOnce(fullDispute);
+      prismaMock.disputeVote.findMany.mockResolvedValueOnce([]);
       (ContractService.getOnChainAssignedArbitrators as jest.Mock).mockResolvedValueOnce(["GARBITRATOR123"]);
       prismaMock.user.findFirst.mockResolvedValueOnce({
         username: "arb_user",
@@ -258,6 +280,7 @@ describe("Dispute Management System", () => {
         attachments: [],
       };
       prismaMock.dispute.findUnique.mockResolvedValueOnce(fullDispute);
+      prismaMock.disputeVote.findMany.mockResolvedValueOnce([]);
       (ContractService.getOnChainAssignedArbitrators as jest.Mock).mockResolvedValueOnce(["GARBITRATOR123"]);
       prismaMock.user.findFirst.mockResolvedValueOnce(null);
 
@@ -328,6 +351,7 @@ describe("Dispute Management System", () => {
       prismaMock.dispute.findUnique.mockResolvedValueOnce(mockDispute);
       prismaMock.disputeVote.findUnique.mockResolvedValueOnce(null);
       prismaMock.disputeVote.create.mockResolvedValueOnce(mockVote);
+      prismaMock.disputeVote.count.mockResolvedValueOnce(1);
       prismaMock.dispute.update.mockResolvedValueOnce({
         ...mockDispute,
         status: DisputeStatus.IN_PROGRESS,
@@ -416,6 +440,7 @@ describe("Dispute Management System", () => {
         votes: [],
       });
       prismaMock.dispute.update.mockResolvedValueOnce(resolvedDispute);
+      prismaMock.disputeVote.count.mockResolvedValueOnce(0);
       prismaMock.job.update.mockResolvedValueOnce({
         ...mockJob,
         status: JobStatus.COMPLETED,
@@ -430,6 +455,14 @@ describe("Dispute Management System", () => {
       expect(dispute.status).toBe(DisputeStatus.RESOLVED);
       expect(dispute.outcome).toBe("Resolved in favor of client");
       expect(dispute.resolvedAt).toBeDefined();
+
+      expect(ReputationCacheService.invalidateCache).toHaveBeenCalledWith(
+        mockClient.walletAddress,
+      );
+      expect(ReputationCacheService.invalidateCache).toHaveBeenCalledWith(
+        mockFreelancer.walletAddress,
+      );
+      expect(ReputationCacheService.invalidateCache).toHaveBeenCalledTimes(2);
     });
 
     it("should prevent resolving already resolved dispute", async () => {

@@ -445,6 +445,12 @@
                                     }
                                   ]
                                 }
+                              },
+                              {
+                                "key": {
+                                  "symbol": "token"
+                                },
+                                "val": "void"
                               }
                             ]
                           }
@@ -469,6 +475,14 @@
                       },
                       "val": {
                         "address": "CACMVW2KK4H5FZDFF2AUCAKQTEJMZZWJUIZF23XMRVYQBSXYLHZ6BKWN"
+                      }
+                    },
+                    {
+                      "key": {
+                        "symbol": "token_balances"
+                      },
+                      "val": {
+                        "vec": []
                       }
                     },
                     {
@@ -686,7 +700,7 @@
                   "map": [
                     {
                       "key": {
-                        "symbol": "last_updated_ledger"
+                        "symbol": "last_updated_ts"
                       },
                       "val": {
                         "u32": 0
@@ -2499,6 +2513,12 @@
                                 }
                               ]
                             }
+                          },
+                          {
+                            "key": {
+                              "symbol": "token"
+                            },
+                            "val": "void"
                           }
                         ]
                       }
@@ -2523,6 +2543,14 @@
                   },
                   "val": {
                     "address": "CACMVW2KK4H5FZDFF2AUCAKQTEJMZZWJUIZF23XMRVYQBSXYLHZ6BKWN"
+                  }
+                },
+                {
+                  "key": {
+                    "symbol": "token_balances"
+                  },
+                  "val": {
+                    "vec": []
                   }
                 },
                 {

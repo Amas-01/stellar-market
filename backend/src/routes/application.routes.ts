@@ -35,6 +35,17 @@ router.post(
     const jobId = req.params.jobId as string;
     const { proposal, estimatedDuration, bidAmount } = req.body;
 
+    const freelancer = await prisma.user.findUnique({
+      where: { id: req.userId },
+      select: { walletAddress: true },
+    });
+    if (!freelancer?.walletAddress) {
+      return res.status(422).json({
+        code: "WalletRequired",
+        message: "You must connect a Stellar wallet before applying.",
+      });
+    }
+
     const job = await prisma.job.findUnique({ where: { id: jobId } });
     if (!job) {
       return res.status(404).json({ error: "Job not found." });
@@ -245,20 +256,22 @@ router.put(
           data: { status: "REJECTED" },
         });
 
-        // Notify each rejected freelancer
-        for (const rejectedApp of rejectedApplications) {
-          await NotificationService.sendNotification({
-            userId: rejectedApp.freelancerId,
-            type: NotificationType.APPLICATION_REJECTED,
-            title: "Application Rejected",
-            message: `Your application for "${application.job.title}" has been rejected. Another candidate was selected.`,
-            metadata: { jobId: application.jobId, applicationId: rejectedApp.id },
-          });
-        }
+        // Notify all rejected freelancers in parallel (fire-and-forget after response)
+        void Promise.all(
+          rejectedApplications.map((rejectedApp) =>
+            NotificationService.sendNotification({
+              userId: rejectedApp.freelancerId,
+              type: NotificationType.APPLICATION_REJECTED,
+              title: "Application Rejected",
+              message: `Your application for "${application.job.title}" has been rejected. Another candidate was selected.`,
+              metadata: { jobId: application.jobId, applicationId: rejectedApp.id },
+            })
+          )
+        );
       }
 
-      // Notify the freelancer
-      await NotificationService.sendNotification({
+      // Notify the accepted freelancer (fire-and-forget after response)
+      void NotificationService.sendNotification({
         userId: application.freelancerId,
         type: NotificationType.APPLICATION_ACCEPTED,
         title: "Application Accepted",

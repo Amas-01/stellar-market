@@ -192,8 +192,8 @@ describe("GET /api/messages/conversations", () => {
       .set(authHeader());
 
     expect(res.status).toBe(200);
-    expect(Array.isArray(res.body)).toBe(true);
-    expect(res.body[0]).toMatchObject({
+    expect(Array.isArray(res.body.data)).toBe(true);
+    expect(res.body.data[0]).toMatchObject({
       partner: { username: "bob" },
     });
   });
@@ -226,7 +226,7 @@ describe("GET /api/messages/:userId", () => {
       .set(authHeader());
 
     expect(res.status).toBe(200);
-    expect(res.body).toHaveLength(1);
+    expect(res.body.data).toHaveLength(1);
     expect(messageMock.updateMany).toHaveBeenCalledWith(
       expect.objectContaining({
         where: expect.objectContaining({

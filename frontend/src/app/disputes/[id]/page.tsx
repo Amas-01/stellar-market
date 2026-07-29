@@ -12,8 +12,10 @@ import DisputeVoteProgress from "@/components/DisputeVoteProgress";
 import EvidenceViewer from "@/components/EvidenceViewer";
 import EvidenceUpload from "@/components/EvidenceUpload";
 import DisputeOutcomeBanner from "@/components/DisputeOutcomeBanner";
+import DisputeTimeline from "@/components/DisputeTimeline";
+import { useDisputeStream } from "@/hooks/useDisputeStream";
 
-const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:5000/api";
+const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:5000/api/v1";
 
 export default function DisputeDetailPage() {
   const { id } = useParams();
@@ -46,15 +48,12 @@ export default function DisputeDetailPage() {
     fetchDispute();
   }, [fetchDispute]);
 
-  useEffect(() => {
-    const isResolved =
-      dispute?.status === "RESOLVED_CLIENT" ||
-      dispute?.status === "RESOLVED_FREELANCER";
-    if (!dispute || isResolved) return;
-
-    const interval = setInterval(fetchDispute, 5000);
-    return () => clearInterval(interval);
-  }, [dispute?.status, fetchDispute]);
+  const { events: timelineEvents, isLive } = useDisputeStream(id as string, {
+    enabled: Boolean(dispute),
+    onEvent: () => {
+      fetchDispute();
+    },
+  });
 
   const handleVote = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -77,6 +76,11 @@ export default function DisputeDetailPage() {
       // 2. Sign & Broadcast
       const txResult = await signAndBroadcastTransaction(res.data.xdr);
 
+      if (txResult.status === "STALE_SESSION") {
+        throw new Error(
+          "Wallet changed while the vote transaction was processing. The vote was not confirmed."
+        );
+      }
       if (!txResult.success) {
         throw new Error(txResult.error || "Transaction failed");
       }
@@ -127,6 +131,11 @@ export default function DisputeDetailPage() {
       // 2. Sign & Broadcast
       const txResult = await signAndBroadcastTransaction(res.data.xdr);
 
+      if (txResult.status === "STALE_SESSION") {
+        throw new Error(
+          "Wallet changed while the resolution transaction was processing. The dispute was not confirmed."
+        );
+      }
       if (!txResult.success) {
         throw new Error(txResult.error || "Transaction failed");
       }
@@ -276,6 +285,8 @@ export default function DisputeDetailPage() {
 
         {/* Sidebar */}
         <div className="space-y-6">
+          <DisputeTimeline events={timelineEvents} isLive={isLive} />
+
           {/* Real-time Vote Progress Component */}
           <DisputeVoteProgress disputeId={id as string} showVoterDetails={true} />
           

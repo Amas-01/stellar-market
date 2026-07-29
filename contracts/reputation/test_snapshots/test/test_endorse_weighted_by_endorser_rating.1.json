@@ -496,6 +496,12 @@
                                     }
                                   ]
                                 }
+                              },
+                              {
+                                "key": {
+                                  "symbol": "token"
+                                },
+                                "val": "void"
                               }
                             ]
                           }
@@ -520,6 +526,14 @@
                       },
                       "val": {
                         "address": "CDS3FDGQ4JA2V3F26Y4BMWWJEC5TT26RJBN7KIQKUMVO2MAOCMDTSZ7A"
+                      }
+                    },
+                    {
+                      "key": {
+                        "symbol": "token_balances"
+                      },
+                      "val": {
+                        "vec": []
                       }
                     },
                     {
@@ -707,7 +721,7 @@
             },
             "ext": "v0"
           },
-          4095
+          6311999
         ]
       ],
       [
@@ -764,7 +778,7 @@
             },
             "ext": "v0"
           },
-          4095
+          6311999
         ]
       ],
       [
@@ -851,7 +865,7 @@
                   "map": [
                     {
                       "key": {
-                        "symbol": "last_updated_ledger"
+                        "symbol": "last_updated_ts"
                       },
                       "val": {
                         "u32": 0
@@ -1119,7 +1133,7 @@
             },
             "ext": "v0"
           },
-          4095
+          6311999
         ]
       ],
       [
@@ -2928,6 +2942,12 @@
                                 }
                               ]
                             }
+                          },
+                          {
+                            "key": {
+                              "symbol": "token"
+                            },
+                            "val": "void"
                           }
                         ]
                       }
@@ -2952,6 +2972,14 @@
                   },
                   "val": {
                     "address": "CDS3FDGQ4JA2V3F26Y4BMWWJEC5TT26RJBN7KIQKUMVO2MAOCMDTSZ7A"
+                  }
+                },
+                {
+                  "key": {
+                    "symbol": "token_balances"
+                  },
+                  "val": {
+                    "vec": []
                   }
                 },
                 {

@@ -171,7 +171,7 @@
                   "map": [
                     {
                       "key": {
-                        "symbol": "last_updated_ledger"
+                        "symbol": "last_updated_ts"
                       },
                       "val": {
                         "u32": 0
@@ -274,18 +274,7 @@
                           ]
                         },
                         "val": {
-                          "vec": [
-                            {
-                              "vec": [
-                                {
-                                  "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAITA4"
-                                },
-                                {
-                                  "u64": 0
-                                }
-                              ]
-                            }
-                          ]
+                          "vec": []
                         }
                       },
                       {

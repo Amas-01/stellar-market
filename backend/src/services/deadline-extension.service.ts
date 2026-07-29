@@ -12,6 +12,7 @@ import { createError } from "../middleware/error";
 import { ContractService } from "./contract.service";
 import { NotificationService } from "./notification.service";
 import { config } from "../config";
+import { logger } from "../lib/logger";
 
 const prisma = new PrismaClient();
 
@@ -224,7 +225,8 @@ export class DeadlineExtensionService {
 
     // If both parties have approved, execute the on-chain transaction
     if (newStatus === DeadlineExtensionStatus.APPROVED_BY_BOTH) {
-      await this.executeExtensionOnChain(updated);
+      const { xdr, message } = await this.executeExtensionOnChain(updated);
+      return { ...updated, xdr, message };
     }
 
     return updated;
@@ -337,7 +339,7 @@ export class DeadlineExtensionService {
           "Both parties have approved. Please sign the transaction to complete the extension.",
       };
     } catch (error) {
-      console.error("Error executing extension on-chain:", error);
+      logger.error({ err: error }, "Error executing extension on-chain:");
       throw createError("Failed to prepare on-chain transaction", 500);
     }
   }

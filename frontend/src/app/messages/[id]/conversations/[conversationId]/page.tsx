@@ -8,7 +8,7 @@ import { ArrowLeft } from "lucide-react";
 import Link from "next/link";
 import { useAuth } from "@/context/AuthContext";
 
-const API = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:5000/api";
+const API = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:5000/api/v1";
 
 export default function ConversationPage() {
   const params = useParams();
@@ -73,9 +73,12 @@ export default function ConversationPage() {
 
       <div className="flex-1 bg-theme-card border border-theme-border rounded-xl overflow-hidden flex flex-col">
         <ChatWindow
+          key={partnerId}
           currentUserId={currentUser?.id || ""}
           partnerId={partnerId}
           partnerUsername={partnerUsername || partnerId}
+          currentUsername={currentUser?.username || ""}
+          currentUserAvatarUrl={currentUser?.avatarUrl || null}
           initialMessages={messages}
         />
       </div>

@@ -13,9 +13,13 @@ import { PrismaClient } from "@prisma/client";
 import { asyncHandler } from "../middleware/error";
 import { avatarUpload } from "../config/upload";
 import { validate } from "../middleware/validation";
-import { ReputationService } from "../services/reputation.service";
+import { ReputationCacheService } from "../services/reputation-cache.service";
 import { normalizeSkills } from "../services/skill.service";
 import { logger } from "../lib/logger";
+import sharp from "sharp";
+import path from "path";
+import fs from "fs";
+import { AVATAR_UPLOAD_DIR } from "../config/upload";
 
 const router = Router();
 const prisma = new PrismaClient();
@@ -60,6 +64,24 @@ router.get("/me", authenticate, async (req: AuthRequest, res: Response) => {
     res.status(500).json({ error: "Internal server error." });
   }
 });
+
+// DELETE /api/users/me — soft-delete current authenticated user's account
+router.delete("/me", authenticate, asyncHandler(async (req: AuthRequest, res: Response) => {
+  const userId = req.userId!;
+
+  await prisma.user.update({
+    where: { id: userId },
+    data: { deletedAt: new Date() },
+  });
+
+  // Revoke all refresh tokens so any stored sessions are invalidated
+  await prisma.refreshToken.updateMany({
+    where: { userId },
+    data: { revoked: true },
+  });
+
+  res.json({ message: "Account deleted." });
+}));
 
 // PUT /api/users/me — update current authenticated user's profile
 router.put(
@@ -150,17 +172,47 @@ router.post(
         res.status(400).json({ error: "No file uploaded. Use field name 'avatar'." });
         return;
       }
-      const avatarUrl = `/api/uploads/avatars/${req.file.filename}`;
-      const updated = await prisma.user.update({
-        where: { id: req.userId },
-        data: { avatarUrl },
-        select: {
-          id: true,
-          username: true,
-          avatarUrl: true,
-        },
-      });
-      res.json(updated);
+
+      const originalPath = req.file.path;
+      const ext = path.extname(req.file.filename);
+      const processedFilename = `avatar-${Date.now()}-processed${ext}`;
+      const processedPath = path.join(AVATAR_UPLOAD_DIR, processedFilename);
+
+      try {
+        await sharp(originalPath)
+          .resize(400, 400, {
+            fit: "cover",
+            position: "center",
+          })
+          .jpeg({ quality: 85 })
+          .toFile(processedPath);
+
+        if (fs.existsSync(originalPath)) {
+          fs.unlinkSync(originalPath);
+        }
+
+        const avatarUrl = `/api/uploads/avatars/${processedFilename}`;
+        const updated = await prisma.user.update({
+          where: { id: req.userId },
+          data: { avatarUrl },
+          select: {
+            id: true,
+            username: true,
+            avatarUrl: true,
+          },
+        });
+
+        res.json(updated);
+      } catch (processingError) {
+        if (fs.existsSync(originalPath)) {
+          fs.unlinkSync(originalPath);
+        }
+        if (fs.existsSync(processedPath)) {
+          fs.unlinkSync(processedPath);
+        }
+        logger.error({ err: processingError }, "Avatar processing error");
+        res.status(500).json({ error: "Failed to process avatar image." });
+      }
     } catch (error) {
       logger.error({ err: error }, "Avatar upload error");
       res.status(500).json({ error: "Internal server error." });
@@ -423,12 +475,12 @@ router.get(
         }
 
         if (user.role === "FREELANCER" && user.walletAddress) {
-          const reputation = await ReputationService.getReputation(user.walletAddress);
+          const reputation = await ReputationCacheService.getCachedReputation(user.walletAddress);
           if (reputation) {
             (user as any).reputation = {
-              totalScore: reputation.total_score.toString(),
-              totalWeight: reputation.total_weight.toString(),
-              reviewCount: reputation.review_count,
+              totalScore: reputation.score.toString(),
+              totalWeight: reputation.endorsementWeight.toString(),
+              reviewCount: 0,
             };
           }
         }
@@ -501,13 +553,13 @@ router.get(
     const usersWithReputation = await Promise.all(
       users.map(async (user: any) => {
         if (user.role === "FREELANCER" && user.walletAddress) {
-          const reputation = await ReputationService.getReputation(user.walletAddress);
+          const reputation = await ReputationCacheService.getCachedReputation(user.walletAddress);
           return {
             ...user,
             reputation: reputation ? {
-              totalScore: reputation.total_score.toString(),
-              totalWeight: reputation.total_weight.toString(),
-              reviewCount: reputation.review_count,
+              totalScore: reputation.score.toString(),
+              totalWeight: reputation.endorsementWeight.toString(),
+              reviewCount: 0,
             } : null,
           };
         }
@@ -562,7 +614,22 @@ router.put(
 
     const body = updateData as Record<string, unknown>;
     const data: Record<string, unknown> = {};
-    if (body.email !== undefined) data.email = body.email;
+    if (body.email !== undefined) {
+      data.email = body.email;
+      
+      // Check email uniqueness if being updated
+      if (body.email) {
+        const existingUser = await prisma.user.findFirst({
+          where: {
+            email: body.email as string,
+            NOT: { id },
+          },
+        });
+        if (existingUser) {
+          return res.status(409).json({ error: "Email is already taken." });
+        }
+      }
+    }
     if (body.bio !== undefined) data.bio = body.bio;
     if (body.skills !== undefined) data.skills = body.skills;
     if (body.availability !== undefined) data.availability = body.availability;

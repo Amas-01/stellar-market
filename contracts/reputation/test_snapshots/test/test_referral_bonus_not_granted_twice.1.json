@@ -558,6 +558,12 @@
                                     }
                                   ]
                                 }
+                              },
+                              {
+                                "key": {
+                                  "symbol": "token"
+                                },
+                                "val": "void"
                               }
                             ]
                           }
@@ -582,6 +588,14 @@
                       },
                       "val": {
                         "address": "CD3FXVGYSLQFFTW3UH6WFF2OKZH7VERGZJZAMJHTGHBWO4F6URWEJL23"
+                      }
+                    },
+                    {
+                      "key": {
+                        "symbol": "token_balances"
+                      },
+                      "val": {
+                        "vec": []
                       }
                     },
                     {
@@ -1136,7 +1150,7 @@
                   "map": [
                     {
                       "key": {
-                        "symbol": "last_updated_ledger"
+                        "symbol": "last_updated_ts"
                       },
                       "val": {
                         "u32": 0
@@ -1222,7 +1236,7 @@
                   "map": [
                     {
                       "key": {
-                        "symbol": "last_updated_ledger"
+                        "symbol": "last_updated_ts"
                       },
                       "val": {
                         "u32": 0
@@ -1308,7 +1322,7 @@
                   "map": [
                     {
                       "key": {
-                        "symbol": "last_updated_ledger"
+                        "symbol": "last_updated_ts"
                       },
                       "val": {
                         "u32": 0
@@ -3757,6 +3771,12 @@
                                 }
                               ]
                             }
+                          },
+                          {
+                            "key": {
+                              "symbol": "token"
+                            },
+                            "val": "void"
                           }
                         ]
                       }
@@ -3781,6 +3801,14 @@
                   },
                   "val": {
                     "address": "CD3FXVGYSLQFFTW3UH6WFF2OKZH7VERGZJZAMJHTGHBWO4F6URWEJL23"
+                  }
+                },
+                {
+                  "key": {
+                    "symbol": "token_balances"
+                  },
+                  "val": {
+                    "vec": []
                   }
                 },
                 {
@@ -4358,6 +4386,12 @@
                                 }
                               ]
                             }
+                          },
+                          {
+                            "key": {
+                              "symbol": "token"
+                            },
+                            "val": "void"
                           }
                         ]
                       }
@@ -4382,6 +4416,14 @@
                   },
                   "val": {
                     "address": "CD3FXVGYSLQFFTW3UH6WFF2OKZH7VERGZJZAMJHTGHBWO4F6URWEJL23"
+                  }
+                },
+                {
+                  "key": {
+                    "symbol": "token_balances"
+                  },
+                  "val": {
+                    "vec": []
                   }
                 },
                 {

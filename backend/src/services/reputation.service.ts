@@ -1,6 +1,7 @@
 import { Contract, Address } from "@stellar/stellar-sdk";
 import { config } from "../config";
 import { ContractService } from "./contract.service";
+import { logger } from "../lib/logger";
 
 export interface OnChainReputation {
   total_score: bigint;
@@ -15,7 +16,7 @@ export class ReputationService {
   static async getReputation(walletAddress: string): Promise<OnChainReputation | null> {
     const contractId = config.stellar.reputationContractId;
     if (!contractId) {
-      console.warn("REPUTATION_CONTRACT_ID not configured");
+      logger.warn("REPUTATION_CONTRACT_ID not configured");
       return null;
     }
 
@@ -34,7 +35,10 @@ export class ReputationService {
       };
     } catch (error) {
       // If user not found on-chain, contract might throw/revert
-      console.warn(`Reputation not found for ${walletAddress}:`, error instanceof Error ? error.message : error);
+      logger.warn(
+        { walletAddress, err: error instanceof Error ? error.message : error },
+        `Reputation not found for ${walletAddress}`,
+      );
       return null;
     }
   }

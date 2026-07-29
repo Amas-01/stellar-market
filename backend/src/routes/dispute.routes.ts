@@ -1,5 +1,5 @@
-import { Router, Request, Response } from "express";
-import { DisputeStatus, UserRole, PrismaClient } from "@prisma/client";
+import express, { Router, Request, Response } from "express";
+import { DisputeStatus, UserRole, PrismaClient, DisputeEventType } from "@prisma/client";
 import crypto from "crypto";
 import fs from "fs";
 import path from "path";
@@ -7,6 +7,9 @@ import { authenticate, AuthRequest } from "../middleware/auth";
 import { asyncHandler } from "../middleware/error";
 import { validate } from "../middleware/validation";
 import { DisputeService } from "../services/dispute.service";
+import { recordDisputeEvent } from "../services/dispute-event.service";
+import { disputeEmitter } from "../lib/dispute-emitter";
+import type { DisputeEvent } from "@prisma/client";
 import { upload, UPLOAD_DIR } from "../config/upload";
 import { validateFileMimeType, formatFileSize } from "../utils/fileValidation";
 import { config, MAX_PAGE_SIZE } from "../config";
@@ -25,9 +28,90 @@ import {
   queryDisputesSchema,
   resolveDisputeSchema,
   webhookPayloadSchema,
+  initiateEvidenceSessionSchema,
+  evidenceSessionParamSchema,
+  evidenceChunkParamSchema,
 } from "../schemas/dispute";
+import {
+  assembleAndVerify,
+  cleanupSession,
+  getReceivedChunks,
+  getSession,
+  initiateSession,
+  MAX_CHUNK_SIZE,
+  saveChunk,
+  validateInitiateInput,
+} from "../services/evidence-upload-session.service";
 
 const prisma = new PrismaClient();
+
+async function assertDisputeViewerAccess(
+  disputeId: string,
+  userId: string,
+  userRole: UserRole | undefined,
+): Promise<{ allowed: true } | { allowed: false; status: number; error: string }> {
+  const dispute = await prisma.dispute.findUnique({
+    where: { id: disputeId },
+    include: {
+      votes: { where: { voterId: userId }, select: { id: true } },
+    },
+  });
+
+  if (!dispute) {
+    return { allowed: false, status: 404, error: "Dispute not found." };
+  }
+
+  const isParticipant =
+    dispute.clientId === userId ||
+    dispute.freelancerId === userId ||
+    dispute.initiatorId === userId;
+  const isRegisteredVoter = dispute.votes.length > 0;
+  const isAdmin = userRole === UserRole.ADMIN;
+
+  if (!isParticipant && !isRegisteredVoter && !isAdmin) {
+    return {
+      allowed: false,
+      status: 403,
+      error:
+        "Access denied. Only dispute participants or registered voters can view this dispute.",
+    };
+  }
+
+  return { allowed: true };
+}
+
+/**
+ * Evidence upload is participant-only (client / freelancer / initiator), unlike
+ * viewing which also admits registered voters and admins.
+ */
+async function assertDisputeParticipant(
+  disputeId: string,
+  userId: string,
+): Promise<
+  | { allowed: true }
+  | { allowed: false; status: number; error: string }
+> {
+  const dispute = await DisputeService.getDisputeById(disputeId);
+  if (!dispute) {
+    return { allowed: false, status: 404, error: "Dispute not found" };
+  }
+  const isParticipant =
+    dispute.clientId === userId ||
+    dispute.freelancerId === userId ||
+    dispute.initiatorId === userId;
+  if (!isParticipant) {
+    return {
+      allowed: false,
+      status: 403,
+      error: "Only dispute participants can upload evidence",
+    };
+  }
+  return { allowed: true };
+}
+
+function writeSseEvent(res: Response, event: DisputeEvent): void {
+  res.write(`id: ${event.id}\ndata: ${JSON.stringify(event)}\n\n`);
+}
 
 async function verifyAnchorTxOnHorizon(txHash: string): Promise<boolean> {
   try {
@@ -80,7 +164,8 @@ router.get(
 
 /**
  * GET /api/disputes
- * Get all disputes with optional filtering and pagination
+ * Get disputes scoped to the requesting user's role.
+ * Freelancers see their own disputes; clients see theirs; admins see all.
  */
 router.get(
   "/",
@@ -88,9 +173,24 @@ router.get(
   validate({ query: queryDisputesSchema }),
   asyncHandler(async (req: AuthRequest, res: Response) => {
     const query = req.query as unknown as { page: number; limit: number };
+    const userId = req.userId!;
+    const role = req.userRole;
+
+    let userFilter: Record<string, unknown> | undefined;
+
+    if (role === UserRole.FREELANCER) {
+      userFilter = { freelancerId: userId };
+    } else if (role === UserRole.CLIENT) {
+      userFilter = { clientId: userId };
+    } else if (role === UserRole.ADMIN) {
+      userFilter = undefined;
+    } else {
+      res.status(403).json({ error: "Access denied." });
+      return;
+    }
 
     const result = await DisputeService.getDisputes(
-      { status: DisputeStatus.OPEN },
+      { status: DisputeStatus.OPEN, userFilter },
       { page: query.page, limit: query.limit },
     );
 
@@ -116,6 +216,64 @@ router.get(
 );
 
 /**
+ * GET /api/disputes/:id/stream
+ * Server-Sent Events stream for dispute timeline updates
+ */
+router.get(
+  "/:id/stream",
+  authenticate,
+  validate({ params: disputeIdParamSchema }),
+  asyncHandler(async (req: AuthRequest, res: Response) => {
+    const disputeId = req.params.id as string;
+    const access = await assertDisputeViewerAccess(
+      disputeId,
+      req.userId!,
+      req.userRole,
+    );
+
+    if (!access.allowed) {
+      res.status(access.status).json({ error: access.error });
+      return;
+    }
+
+    res.setHeader("Content-Type", "text/event-stream");
+    res.setHeader("Cache-Control", "no-cache");
+    res.setHeader("Connection", "keep-alive");
+    res.flushHeaders?.();
+
+    const lastEventHeader = req.headers["last-event-id"];
+    const lastEventId = Number(
+      Array.isArray(lastEventHeader) ? lastEventHeader[0] : lastEventHeader ?? "0",
+    );
+    const cursor = Number.isFinite(lastEventId) && lastEventId >= 0 ? lastEventId : 0;
+
+    const backfill = await prisma.disputeEvent.findMany({
+      where: { disputeId, id: { gt: cursor } },
+      orderBy: { id: "asc" },
+    });
+
+    for (const event of backfill) {
+      writeSseEvent(res, event);
+    }
+
+    const listener = (event: DisputeEvent) => {
+      writeSseEvent(res, event);
+    };
+
+    disputeEmitter.on(`dispute:${disputeId}`, listener);
+
+    const keepAlive = setInterval(() => {
+      res.write(": keepalive\n\n");
+    }, 15_000);
+
+    req.on("close", () => {
+      clearInterval(keepAlive);
+      disputeEmitter.off(`dispute:${disputeId}`, listener);
+    });
+  }),
+);
+
+/**
  * GET /api/disputes/:id
  * Get specific dispute details
  */
@@ -124,8 +282,10 @@ router.get(
   authenticate,
   validate({ params: disputeIdParamSchema }),
   asyncHandler(async (req: AuthRequest, res: Response) => {
+    const isAdmin = req.userRole === UserRole.ADMIN;
     const dispute = (await DisputeService.getDisputeById(
       req.params.id as string,
+      isAdmin,
     )) as any;
 
     const userId = req.userId!;
@@ -134,12 +294,7 @@ router.get(
       dispute.freelancerId === userId ||
       dispute.initiatorId === userId;
 
-    const isRegisteredVoter = Array.isArray(dispute.votes)
-      ? dispute.votes.some((vote: any) => vote.voterId === userId)
-      : false;
-    const isAdmin = req.userRole === UserRole.ADMIN;
-
-    if (!isParticipant && !isRegisteredVoter && !isAdmin) {
+    if (!isParticipant && !isAdmin) {
       res.status(403).json({
         error:
           "Access denied. Only dispute participants or registered voters can view this dispute.",
@@ -148,6 +303,43 @@ router.get(
     }
 
     res.json(dispute);
+  }),
+);
+
+/**
+ * GET /api/disputes/:id/votes
+ * Get paginated votes for a dispute (audit trail)
+ */
+router.get(
+  "/:id/votes",
+  authenticate,
+  validate({ params: disputeIdParamSchema }),
+  asyncHandler(async (req: AuthRequest, res: Response) => {
+    const disputeId = req.params.id as string;
+    const cursor = req.query.cursor as string | undefined;
+    const limit = Math.min(Number(req.query.limit) || 20, 100);
+
+    const dispute = await DisputeService.getDisputeById(disputeId);
+    if (!dispute) {
+      res.status(404).json({ error: "Dispute not found." });
+      return;
+    }
+
+    const isAdmin = req.userRole === UserRole.ADMIN;
+    const isParticipant =
+      dispute.clientId === req.userId ||
+      dispute.freelancerId === req.userId ||
+      dispute.initiatorId === req.userId;
+
+    if (!isParticipant && !isAdmin) {
+      res.status(403).json({
+        error: "Access denied. Only dispute participants can view vote history.",
+      });
+      return;
+    }
+
+    const result = await DisputeService.getVotesByDisputeId(disputeId, cursor, limit);
+    res.json(result);
   }),
 );
 
@@ -447,7 +639,284 @@ router.post(
       });
     }
 
+    if (attachments.length > 0) {
+      await recordDisputeEvent(disputeId, DisputeEventType.EVIDENCE_SUBMITTED, {
+        fileCount: attachments.length,
+        uploaderId: req.userId,
+      });
+    }
+
     res.status(201).json({ attachments });
+  }),
+);
+
+/**
+ * Resumable / chunked evidence upload protocol.
+ *
+ * The whole multi-file batch is no longer one all-or-nothing request. Each file
+ * gets its own upload session (initiate -> upload parts -> complete), keyed
+ * deterministically by (dispute, uploader, file hash). A dropped connection
+ * therefore discards only the in-flight chunks of one file; already-completed
+ * files and already-received chunks are not re-sent. The assembled file's
+ * SHA-256 is recomputed server-side and must match the client-declared hash.
+ */
+
+/**
+ * POST /api/disputes/:id/evidence/sessions
+ * Initiate (or resume) a chunked upload session. Returns the stable sessionId
+ * and the set of chunk indexes already received, so the client can skip them.
+ */
+router.post(
+  "/:id/evidence/sessions",
+  authenticate,
+  validate({ params: disputeIdParamSchema, body: initiateEvidenceSessionSchema }),
+  asyncHandler(async (req: AuthRequest, res: Response) => {
+    const disputeId = req.params.id as string;
+
+    if (!isEvidenceStorageConfigured()) {
+      return res
+        .status(503)
+        .json({ error: "Evidence S3 storage is not configured" });
+    }
+
+    const access = await assertDisputeParticipant(disputeId, req.userId!);
+    if (!access.allowed) {
+      return res.status(access.status).json({ error: access.error });
+    }
+
+    const body = req.body as {
+      originalName: string;
+      sha256: string;
+      size: number;
+      mimeType: string;
+      chunkSize: number;
+      totalChunks: number;
+      anchorTxHash?: string | null;
+    };
+
+    const reason = validateInitiateInput({
+      size: body.size,
+      chunkSize: body.chunkSize,
+      totalChunks: body.totalChunks,
+      sha256: body.sha256,
+    });
+    if (reason) {
+      return res.status(400).json({ error: reason });
+    }
+
+    const { sessionId, manifest, receivedChunks } = initiateSession({
+      disputeId,
+      uploaderId: req.userId!,
+      originalName: body.originalName,
+      sha256: body.sha256,
+      size: body.size,
+      mimeType: body.mimeType,
+      chunkSize: body.chunkSize,
+      totalChunks: body.totalChunks,
+      anchorTxHash: body.anchorTxHash ?? null,
+      createdAt: new Date().toISOString(),
+    });
+
+    res.status(200).json({
+      sessionId,
+      totalChunks: manifest.totalChunks,
+      receivedChunks,
+    });
+  }),
+);
+
+/**
+ * GET /api/disputes/:id/evidence/sessions/:sessionId
+ * Status of an in-flight session (which chunks are already on the server).
+ */
+router.get(
+  "/:id/evidence/sessions/:sessionId",
+  authenticate,
+  validate({ params: evidenceSessionParamSchema }),
+  asyncHandler(async (req: AuthRequest, res: Response) => {
+    const { sessionId } = req.params as unknown as { sessionId: string };
+    const manifest = getSession(sessionId);
+    if (!manifest) {
+      return res.status(404).json({ error: "Upload session not found" });
+    }
+    return res.status(200).json({
+      sessionId,
+      totalChunks: manifest.totalChunks,
+      receivedChunks: getReceivedChunks(sessionId),
+    });
+  }),
+);
+
+/**
+ * PUT /api/disputes/:id/evidence/sessions/:sessionId/chunks/:index
+ * Upload a single chunk (raw binary body). Idempotent: re-sending an already
+ * received chunk is accepted and is a no-op.
+ */
+router.put(
+  "/:id/evidence/sessions/:sessionId/chunks/:index",
+  authenticate,
+  validate({ params: evidenceChunkParamSchema }),
+  express.raw({ type: "application/octet-stream", limit: MAX_CHUNK_SIZE + 1024 }),
+  asyncHandler(async (req: AuthRequest, res: Response) => {
+    const { sessionId, index } = req.params as unknown as {
+      sessionId: string;
+      index: string;
+    };
+
+    const manifest = getSession(sessionId);
+    if (!manifest) {
+      return res.status(404).json({ error: "Upload session not found" });
+    }
+
+    const access = await assertDisputeParticipant(
+      manifest.disputeId,
+      req.userId!,
+    );
+    if (!access.allowed) {
+      return res.status(access.status).json({ error: access.error });
+    }
+
+    if (!Buffer.isBuffer(req.body)) {
+      return res.status(400).json({ error: "Chunk body is required" });
+    }
+
+    let receivedChunks: number[];
+    try {
+      ({ receivedChunks } = saveChunk(sessionId, Number(index), req.body));
+    } catch (err) {
+      const message =
+        err instanceof Error ? err.message : "Failed to store chunk";
+      return res.status(400).json({ error: message });
+    }
+
+    return res.status(200).json({ sessionId, index: Number(index), receivedChunks });
+  }),
+);
+
+/**
+ * POST /api/disputes/:id/evidence/sessions/:sessionId/complete
+ * Assemble the chunks, verify the SHA-256, validate MIME type, store to S3, and
+ * record the attachment. Aborts the session on hash mismatch or validation
+ * failure so a corrupted resume can never be recorded as intact.
+ */
+router.post(
+  "/:id/evidence/sessions/:sessionId/complete",
+  authenticate,
+  validate({ params: evidenceSessionParamSchema }),
+  asyncHandler(async (req: AuthRequest, res: Response) => {
+    const { sessionId } = req.params as unknown as { sessionId: string };
+    const manifest = getSession(sessionId);
+    if (!manifest) {
+      return res.status(404).json({ error: "Upload session not found" });
+    }
+
+    const access = await assertDisputeParticipant(
+      manifest.disputeId,
+      req.userId!,
+    );
+    if (!access.allowed) {
+      return res.status(access.status).json({ error: access.error });
+    }
+
+    let assembled;
+    try {
+      assembled = assembleAndVerify(sessionId);
+    } catch (err) {
+      const message =
+        err instanceof Error ? err.message : "Failed to assemble file";
+      return res.status(400).json({ error: message });
+    }
+
+    if (!assembled.verified) {
+      cleanupSession(sessionId);
+      return res.status(422).json({
+        error:
+          "Integrity check failed: server-computed hash does not match the declared hash",
+        computedSha256: assembled.computedSha256,
+        declaredSha256: manifest.sha256,
+      });
+    }
+
+    const validation = await validateFileMimeType(assembled.filePath);
+    if (!validation.valid) {
+      cleanupSession(sessionId);
+      return res.status(415).json({
+        error: validation.error || "Unsupported file type",
+      });
+    }
+
+    const storageKey = `disputes/${manifest.disputeId}/${sessionId}`;
+    try {
+      await uploadEvidenceObject({
+        key: storageKey,
+        filePath: assembled.filePath,
+        contentType: validation.detectedType || manifest.mimeType,
+      });
+    } finally {
+      // The assembled file exists only while validating + uploading it.
+      cleanupSession(sessionId);
+    }
+
+    const candidateAnchorTx = manifest.anchorTxHash || null;
+    if (candidateAnchorTx) {
+      const txExists = await verifyAnchorTxOnHorizon(candidateAnchorTx);
+      if (!txExists) {
+        return res.status(422).json({ error: "Anchor transaction not found" });
+      }
+    }
+
+    const attachment = await prisma.attachment.create({
+      data: {
+        uploaderId: req.userId!,
+        disputeId: manifest.disputeId,
+        filename: storageKey,
+        originalName: manifest.originalName,
+        mimeType: validation.detectedType || manifest.mimeType,
+        size: manifest.size,
+        url: `s3://${config.evidenceStorage.bucket}/${storageKey}`,
+        sha256: assembled.computedSha256,
+        anchorTxHash: candidateAnchorTx,
+      },
+    });
+
+    await recordDisputeEvent(
+      manifest.disputeId,
+      DisputeEventType.EVIDENCE_SUBMITTED,
+      { fileCount: 1, uploaderId: req.userId, originalName: manifest.originalName },
+    );
+
+    return res.status(201).json({
+      attachment: {
+        ...attachment,
+        sizeFormatted: formatFileSize(attachment.size),
+      },
+    });
+  }),
+);
+
+/**
+ * DELETE /api/disputes/:id/evidence/sessions/:sessionId
+ * Abort an in-flight session and discard its partial chunks.
+ */
+router.delete(
+  "/:id/evidence/sessions/:sessionId",
+  authenticate,
+  validate({ params: evidenceSessionParamSchema }),
+  asyncHandler(async (req: AuthRequest, res: Response) => {
+    const { sessionId } = req.params as unknown as { sessionId: string };
+    const manifest = getSession(sessionId);
+    if (!manifest) {
+      return res.status(404).json({ error: "Upload session not found" });
+    }
+    const access = await assertDisputeParticipant(
+      manifest.disputeId,
+      req.userId!,
+    );
+    if (!access.allowed) {
+      return res.status(access.status).json({ error: access.error });
+    }
+    cleanupSession(sessionId);
+    return res.status(200).json({ sessionId, aborted: true });
   }),
 );
 

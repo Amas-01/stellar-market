@@ -9,6 +9,7 @@ import MessageBubble from "@/components/MessageBubble";
 import Image from "next/image";
 import { useAuth } from "@/context/AuthContext";
 import { useSocket } from "@/context/SocketContext";
+import Avatar from "@/components/Avatar";
 
 type Job = {
   [key: string]: string;
@@ -39,7 +40,7 @@ export default function ChatThreadPage() {
       if (!token) return;
       setLoading(true);
       const response = await axios.get(
-        `${process.env.NEXT_PUBLIC_API_URL || "http://localhost:5000/api"}/messages?participantId=${otherUserId}${actualJobId ? `&jobId=${actualJobId}` : ""}`,
+        `${process.env.NEXT_PUBLIC_API_URL || "http://localhost:5000/api/v1"}/messages?participantId=${otherUserId}${actualJobId ? `&jobId=${actualJobId}` : ""}`,
         {
           headers: { Authorization: `Bearer ${token}` },
         },
@@ -59,7 +60,7 @@ export default function ChatThreadPage() {
       }
 
       await axios.get(
-        `${process.env.NEXT_PUBLIC_API_URL || "http://localhost:5000/api"}/messages/${otherUserId}${actualJobId ? `?jobId=${actualJobId}` : ""}`,
+        `${process.env.NEXT_PUBLIC_API_URL || "http://localhost:5000/api/v1"}/messages/${otherUserId}${actualJobId ? `?jobId=${actualJobId}` : ""}`,
         {
           headers: { Authorization: `Bearer ${token}` },
         },
@@ -128,7 +129,7 @@ export default function ChatThreadPage() {
         setNewMessage("");
       } else {
         const response = await axios.post(
-          `${process.env.NEXT_PUBLIC_API_URL || "http://localhost:5000/api"}/messages`,
+          `${process.env.NEXT_PUBLIC_API_URL || "http://localhost:5000/api/v1"}/messages`,
           {
             receiverId: otherUserId,
             jobId: actualJobId,
@@ -172,17 +173,11 @@ export default function ChatThreadPage() {
             <ArrowLeft size={20} />
           </button>
           <div className="flex items-center gap-3">
-            <div className="w-10 h-10 rounded-full bg-gradient-to-br from-stellar-blue to-stellar-purple flex items-center justify-center text-white font-bold overflow-hidden">
-              {otherUser?.avatarUrl ? (
-                <Image
-                  src={otherUser.avatarUrl}
-                  alt={otherUser.username}
-                  className="w-full h-full object-cover"
-                />
-              ) : (
-                <User size={20} className="text-white/50" />
-              )}
-            </div>
+            <Avatar
+              src={otherUser?.avatarUrl}
+              alt={otherUser?.username || "Chat"}
+              size={40}
+            />
             <div>
               <h2 className="font-bold text-theme-heading">
                 {otherUser?.username || "Chat"}

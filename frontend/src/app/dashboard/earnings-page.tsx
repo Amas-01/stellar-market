@@ -27,9 +27,10 @@ import {
 import axios from "axios";
 import StatusBadge from "@/components/StatusBadge";
 import { useAuth } from "@/context/AuthContext";
+import { useMediaQuery } from "@/hooks/useMediaQuery";
 import { buildSeries, type WeeklyEarning } from "./earnings/earnings-utils";
 
-const API = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:5000/api";
+const API = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:5000/api/v1";
 
 interface EarningsSummary {
   totalEarned: number;
@@ -165,7 +166,11 @@ const EarningsPage = () => {
 
   const range = useMemo(() => resolveRange(preset), [preset]);
 
-  const fetchEarnings = useCallback(async () => {
+  // Below 375px (budget Android devices) we shrink bars and drop the legend to
+  // avoid clutter while keeping the moving-average line readable.
+  const isNarrow = useMediaQuery("(max-width: 374px)");
+
+  const fetchEarnings = useCallback(async (signal?: AbortSignal) => {
     if (!user) return;
 
     setLoading(true);
@@ -179,7 +184,7 @@ const EarningsPage = () => {
 
       const response = await axios.get<EarningsResponse>(
         `${API}/freelancers/earnings?${params.toString()}`,
-        { headers: authHeader() },
+        { headers: authHeader(), signal },
       );
 
       setSummary(response.data.summary);
@@ -188,6 +193,7 @@ const EarningsPage = () => {
       setTransactions(response.data.transactions);
       setTotalPages(response.data.pagination.totalPages);
     } catch (err) {
+      if (axios.isCancel(err)) return;
       if (axios.isAxiosError(err) && err.response?.status === 403) {
         setError("Only freelancers can access this page.");
       } else {
@@ -198,7 +204,7 @@ const EarningsPage = () => {
     }
   }, [user, currentPage, range.from, range.to]);
 
-  const fetchReconciliation = useCallback(async () => {
+  const fetchReconciliation = useCallback(async (signal?: AbortSignal) => {
     if (!user) return;
     setReconciling(true);
     try {
@@ -208,11 +214,11 @@ const EarningsPage = () => {
       const params = new URLSearchParams(rawReconcileParams);
       const response = await axios.get<ReconcileResponse>(
         `${API}/freelancers/earnings/reconcile?${params.toString()}`,
-        { headers: authHeader() },
+        { headers: authHeader(), signal },
       );
       setReconcile(response.data);
-    } catch {
-      // Reconciliation is best-effort; the chart/table still render without it.
+    } catch (err) {
+      if (axios.isCancel(err)) return;
       setReconcile(null);
     } finally {
       setReconciling(false);
@@ -220,11 +226,15 @@ const EarningsPage = () => {
   }, [user, range.from, range.to]);
 
   useEffect(() => {
-    fetchEarnings();
+    const controller = new AbortController();
+    fetchEarnings(controller.signal);
+    return () => controller.abort();
   }, [fetchEarnings]);
 
   useEffect(() => {
-    fetchReconciliation();
+    const controller = new AbortController();
+    fetchReconciliation(controller.signal);
+    return () => controller.abort();
   }, [fetchReconciliation]);
 
   // Reset to page 1 whenever the range changes.
@@ -429,40 +439,40 @@ const EarningsPage = () => {
           <h2 className="text-theme-heading text-lg font-semibold mb-4">
             Earnings Over Time
           </h2>
-          <div className="overflow-x-auto -mx-4 sm:mx-0">
-            <div className="min-w-[500px] px-4 sm:px-0">
-              <ResponsiveContainer width="100%" height={300}>
-                <ComposedChart data={series}>
-                  <CartesianGrid strokeDasharray="3 3" />
-                  <XAxis dataKey="label" />
-                  <YAxis />
-                  <Tooltip
-                    formatter={(value) => formatCurrency(Number(value))}
-                    contentStyle={{
-                      backgroundColor: "#1e293b",
-                      border: "1px solid #475569",
-                      borderRadius: "8px",
-                      color: "#f1f5f9",
-                    }}
-                  />
-                  <Legend />
-                  <Bar
-                    dataKey="earnings"
-                    name="Weekly earnings"
-                    fill="#10b981"
-                    radius={[4, 4, 0, 0]}
-                  />
-                  <Line
-                    type="monotone"
-                    dataKey="movingAvg"
-                    name="30-day moving avg"
-                    stroke="#6366f1"
-                    strokeWidth={2}
-                    dot={false}
-                  />
-                </ComposedChart>
-              </ResponsiveContainer>
-            </div>
+          <div data-testid="earnings-chart-wrapper" className="w-full">
+            <ResponsiveContainer width="100%" height={300}>
+              <ComposedChart data={series} margin={{ top: 8, right: 8, left: 0, bottom: 0 }}>
+                <CartesianGrid strokeDasharray="3 3" />
+                <XAxis dataKey="label" />
+                <YAxis width={isNarrow ? 32 : 60} />
+                <Tooltip
+                  formatter={(value) => formatCurrency(Number(value))}
+                  contentStyle={{
+                    backgroundColor: "#1e293b",
+                    border: "1px solid #475569",
+                    borderRadius: "8px",
+                    color: "#f1f5f9",
+                  }}
+                />
+                {!isNarrow && <Legend />}
+                <Bar
+                  dataKey="earnings"
+                  name="Weekly earnings"
+                  fill="#10b981"
+                  radius={[4, 4, 0, 0]}
+                  barSize={isNarrow ? 10 : undefined}
+                  maxBarSize={isNarrow ? 12 : 40}
+                />
+                <Line
+                  type="monotone"
+                  dataKey="movingAvg"
+                  name="30-day moving avg"
+                  stroke="#6366f1"
+                  strokeWidth={2}
+                  dot={false}
+                />
+              </ComposedChart>
+            </ResponsiveContainer>
           </div>
         </div>
       )}

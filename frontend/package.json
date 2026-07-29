@@ -25,6 +25,8 @@
     "@uiw/react-md-editor": "^4.0.11",
     "autoprefixer": "^10.4.20",
     "axios": "^1.7.9",
+    "fake-indexeddb": "^6.2.5",
+    "framer-motion": "^11.18.2",
     "idb": "^8.0.3",
     "lucide-react": "^0.468.0",
     "next": "^16.2.1",
@@ -58,7 +60,7 @@
     "jest": "^30.2.0",
     "jest-environment-jsdom": "^30.2.0",
     "storybook": "^10.4.5",
-    "ts-jest": "^29.4.6",
+    "ts-jest": "^29.4.11",
     "ts-node": "^10.9.2",
     "typescript": "^5.7.2",
     "vite": "^6.4.3"

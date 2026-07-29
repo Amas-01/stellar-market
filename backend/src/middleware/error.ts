@@ -30,10 +30,9 @@ export const errorHandler = (
     code = ErrorCodes.VALIDATION_ERROR;
     statusCode = 400;
     message = 'Validation failed';
-    details = err.issues.map(error => ({
-      field: error.path.join('.'),
-      message: error.message,
-      code: error.code
+    details = err.issues.map(issue => ({
+      field: issue.path.join('.'),
+      message: issue.message,
     }));
   } else if (err.name === 'PrismaClientKnownRequestError') {
     code = ErrorCodes.DATABASE_ERROR;
@@ -55,6 +54,10 @@ export const errorHandler = (
     code = ErrorCodes.TOKEN_EXPIRED;
     statusCode = 401;
     message = 'Token expired';
+  } else if ((err as any).type === 'entity.too.large') {
+    code = ErrorCodes.PAYLOAD_TOO_LARGE;
+    statusCode = 413;
+    message = 'Request body is too large. Maximum size is 1MB.';
   } else if (err.name === 'MulterError') {
     code = ErrorCodes.FILE_UPLOAD_FAILED;
     statusCode = 400;
@@ -84,6 +87,18 @@ export const errorHandler = (
 
   if (statusCode === 503) {
     res.setHeader("Retry-After", "30");
+  }
+
+  // Validation errors surface the issues as a top-level `errors` array
+  // matching the {errors: [{field, message}]} contract expected by clients.
+  if (code === ErrorCodes.VALIDATION_ERROR && Array.isArray(details)) {
+    res.status(statusCode).json({
+      code,
+      message,
+      requestId: req.requestId,
+      errors: details,
+    });
+    return;
   }
 
   res.status(statusCode).json({
