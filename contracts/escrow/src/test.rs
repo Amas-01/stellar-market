@@ -6793,3 +6793,54 @@ fn test_extend_deadline_rejects_cancelled_job() {
     assert_eq!(result, Err(Ok(EscrowError::InvalidStatus)));
 }
 
+/// AC-2: extend_deadline on an Expired (terminal) job must return InvalidStatus (#3).
+///
+/// Lifecycle: create → fund → advance past job_deadline → expire_job → try_extend_deadline.
+/// This completes AC-2 coverage for all three terminal states: Completed, Cancelled, Expired.
+#[test]
+fn test_extend_deadline_rejects_expired_job() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().with_mut(|l| l.timestamp = 1000);
+
+    let contract_id = env.register_contract(None, EscrowContract);
+    let client = EscrowContractClient::new(&env, &contract_id);
+
+    let user = Address::generate(&env);
+    let freelancer = Address::generate(&env);
+    let admin = Address::generate(&env);
+    let token_address = env.register_stellar_asset_contract_v2(admin.clone()).address();
+    soroban_sdk::token::StellarAssetClient::new(&env, &token_address).mint(&user, &1000);
+
+    client.initialize(&vec![&env, admin.clone()], &1, &admin, &0u32, &604800u64);
+
+    // milestone deadline < job_deadline so both are valid at creation time
+    let milestones = vec![
+        &env,
+        (String::from_str(&env, "Only task"), 100_i128, JOB_DEADLINE / 2),
+    ];
+    let job_id = client.create_job(
+        &user,
+        &freelancer,
+        &token_address,
+        &milestones,
+        &JOB_DEADLINE,
+        &GRACE_PERIOD,
+        &DEFAULT_EXPIRY_LEDGER,
+    );
+
+    // Fund the job so it holds escrowed tokens (Funded status required for expire_job)
+    client.fund_job(&job_id, &user, &0, &0);
+
+    // Advance past the job deadline so expire_job succeeds
+    env.ledger().with_mut(|l| l.timestamp = JOB_DEADLINE + 1);
+    client.expire_job(&job_id);
+
+    let job = client.get_job(&job_id);
+    assert_eq!(job.status, JobStatus::Expired);
+
+    // Extending deadline on an Expired job must return InvalidStatus
+    let result = client.try_extend_deadline(&job_id, &0, &(JOB_DEADLINE - 1));
+    assert_eq!(result, Err(Ok(EscrowError::InvalidStatus)));
+}
+
