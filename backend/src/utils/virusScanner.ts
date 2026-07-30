@@ -38,16 +38,17 @@ export async function initializeVirusScanner(): Promise<void> {
     const version = await clamScanInstance.getVersion();
     clamAvailable = true;
     logger.info(`[VirusScanner] ClamAV initialized successfully. Version: ${version}`);
-  } catch (error: any) {
+  } catch (error) {
     clamAvailable = false;
+    const errMessage = error instanceof Error ? error.message : String(error);
     logger.warn(
-      { err: error.message },
+      { err: errMessage },
       `[VirusScanner] ClamAV initialization failed. Virus scanning will be skipped.`,
     );
     auditLogger.log({
       action: "VIRUS_SCANNER_INIT_FAILED",
       userId: "system",
-      details: { error: error.message },
+      details: { error: errMessage },
       ipAddress: "localhost",
     });
   }
@@ -117,22 +118,23 @@ export async function scanFile(filePath: string): Promise<ScanResult> {
     return {
       isInfected: false,
     };
-  } catch (error: any) {
+  } catch (error) {
     // Log error but don't fail the upload - degrade gracefully
-    logger.error({ err: error.message, filePath }, `[VirusScanner] Scan error for ${filePath}`);
+    const errMessage = error instanceof Error ? error.message : String(error);
+    logger.error({ err: errMessage, filePath }, `[VirusScanner] Scan error for ${filePath}`);
     auditLogger.log({
       action: "VIRUS_SCAN_ERROR",
       userId: "system",
       details: {
         filePath,
-        error: error.message,
+        error: errMessage,
       },
       ipAddress: "localhost",
     });
 
     return {
       isInfected: false,
-      error: error.message,
+      error: errMessage,
       skipped: true,
     };
   }

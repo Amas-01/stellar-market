@@ -27,7 +27,11 @@ export class ReputationService {
       );
 
       // result is a native object from scValToNative
-      const rep = native as any;
+      const rep = native as {
+        total_score?: number | bigint;
+        total_weight?: number | bigint;
+        review_count?: number | bigint;
+      };
       return {
         total_score: BigInt(rep.total_score ?? 0),
         total_weight: BigInt(rep.total_weight ?? 0),
