@@ -53,6 +53,7 @@ export const validate = (schema: {
         res.status(400).json({
           code: "VALIDATION_ERROR",
           message: "Validation failed",
+          error: "Validation failed",
           errors,
         });
         return;

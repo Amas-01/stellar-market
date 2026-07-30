@@ -10,7 +10,6 @@ import { Buffer } from "buffer";
 // jest's "mock"-prefixed variable exemption so the factory can reference them
 // without violating the out-of-scope-variable restriction on jest.mock factories.
 import * as mockJwt from "jsonwebtoken";
-import { config as mockAuthConfig } from "../../config";
 
 // Drive the session service to a temp dir and mark storage configured BEFORE any
 // module that reads those values is required.
@@ -19,6 +18,13 @@ const TEMP_SESSION_DIR = fs.mkdtempSync(
 );
 process.env.EVIDENCE_SESSION_DIR = TEMP_SESSION_DIR;
 process.env.EVIDENCE_S3_BUCKET = "test-bucket";
+
+// `config` is a top-level singleton evaluated at module-load time from
+// process.env — it must be required (not statically imported, which ES
+// import hoisting would run before the env vars above are set) after the
+// env vars are in place.
+// eslint-disable-next-line @typescript-eslint/no-require-imports
+const { config: mockAuthConfig } = require("../../config") as typeof import("../../config");
 
 jest.mock("@prisma/client", () => {
   const mockPrisma = {

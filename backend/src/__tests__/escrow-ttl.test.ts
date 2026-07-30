@@ -14,6 +14,9 @@ jest.mock("@prisma/client", () => ({
       create: mockNotificationCreate,
     },
   })),
+  NotificationType: {
+    ESCROW_TTL_WARNING: "ESCROW_TTL_WARNING",
+  },
 }));
 
 const mockGetEscrowTtl = jest.fn<(...args: unknown[]) => Promise<unknown>>();

@@ -44,7 +44,7 @@ describe("Escrow Database Integration (Real DB Constraints)", () => {
     try {
       await prisma.$connect();
       isDbReachable = true;
-    } catch (e) {
+    } catch {
       console.warn("Real database is not reachable. Skipping database constraint integration tests.");
     }
   });

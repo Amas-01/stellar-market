@@ -65,28 +65,28 @@ export function installRequestIdConsolePatch(): void {
   console.log = (...args: unknown[]) => {
     try {
       logger.info({ args }, formatArgs(args));
-    } catch (e) {
+    } catch {
       orig.log(...args);
     }
   };
   console.info = (...args: unknown[]) => {
     try {
       logger.info({ args }, formatArgs(args));
-    } catch (e) {
+    } catch {
       orig.info(...args);
     }
   };
   console.warn = (...args: unknown[]) => {
     try {
       logger.warn({ args }, formatArgs(args));
-    } catch (e) {
+    } catch {
       orig.warn(...args);
     }
   };
   console.debug = (...args: unknown[]) => {
     try {
       logger.debug({ args }, formatArgs(args));
-    } catch (e) {
+    } catch {
       orig.debug(...args);
     }
   };
@@ -98,7 +98,7 @@ export function installRequestIdConsolePatch(): void {
       } else {
         logger.error({ args }, formatArgs(args));
       }
-    } catch (e) {
+    } catch {
       orig.error(...args);
     }
   };

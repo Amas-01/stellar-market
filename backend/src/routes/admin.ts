@@ -18,7 +18,7 @@ import { logAdminAction } from "../utils/auditLogger";
 import { AuditService } from "../services/audit.service";
 import { NotificationService } from "../services/notification.service";
 import { validate } from "../middleware/validation";
-import { getHorizonStatus, replayHorizonDlq } from "../services/horizon-listener.service";
+import { getHorizonStatus, replayHorizonDlq, overrideHorizonCursor } from "../services/horizon-listener.service";
 import { projectJobState } from "../services/escrow-projection.service";
 import { ReputationCacheService } from "../services/reputation-cache.service";
 import { logger } from "../lib/logger";
@@ -58,11 +58,7 @@ router.post(
     try {
       const { cursor } = req.body as { cursor: string };
 
-      await prisma.horizonCursor.upsert({
-        where: { id: 1 },
-        update: { cursor },
-        create: { id: 1, cursor },
-      });
+      await overrideHorizonCursor(cursor);
 
       await logAdminAction(req.userId!, "HORIZON_CURSOR_OVERRIDE", "horizon", {
         cursor,
@@ -96,10 +92,7 @@ router.post(
         result,
       );
 
-      res.json({
-        message: "DLQ replay completed",
-        ...result,
-      });
+      res.json(result);
     } catch (error) {
       logger.error({ err: error }, "Error replaying DLQ:");
       res.status(500).json({ error: "Internal server error" });
@@ -679,7 +672,7 @@ router.get(
           totalPages: Math.ceil(total / limit),
         },
       });
-    } catch (error) {
+    } catch {
       res.status(500).json({ error: "Internal server error" });
     }
   },
@@ -1089,7 +1082,7 @@ router.get(
           totalPages: Math.ceil(total / limit),
         },
       });
-    } catch (error) {
+    } catch {
       res.status(500).json({ error: "Internal server error" });
     }
   },
@@ -1268,7 +1261,7 @@ router.post(
       await logAdminAction(req.userId!, "DISMISS_JOB_FLAG", id);
 
       res.json({ message: "Job flag dismissed successfully", job: updatedJob });
-    } catch (error) {
+    } catch {
       res.status(500).json({ error: "Internal server error" });
     }
   },
@@ -1323,7 +1316,7 @@ router.post(
       });
 
       res.json({ message: "User suspended successfully", user: updatedUser });
-    } catch (error) {
+    } catch {
       res.status(500).json({ error: "Internal server error" });
     }
   },
@@ -1357,7 +1350,7 @@ router.post(
       await logAdminAction(req.userId!, "UNSUSPEND_USER", id);
 
       res.json({ message: "User restored successfully", user: updatedUser });
-    } catch (error) {
+    } catch {
       res.status(500).json({ error: "Internal server error" });
     }
   },
