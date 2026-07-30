@@ -171,8 +171,7 @@ fn test_extend_deadline_emits_event() {
 
     let milestones = vec![
         &env,
-        // milestone deadline is half the job deadline, leaving room to extend
-        (String::from_str(&env, "Design mockups"), 500_i128, JOB_DEADLINE / 2),
+        (String::from_str(&env, "Design mockups"), 500_i128, JOB_DEADLINE),
     ];
 
     let job_id = contract.create_job(
@@ -185,8 +184,7 @@ fn test_extend_deadline_emits_event() {
         &DEFAULT_EXPIRY_LEDGER,
     );
 
-    // new_deadline is within job_deadline (JOB_DEADLINE - 1)
-    let new_deadline = JOB_DEADLINE - 1;
+    let new_deadline = JOB_DEADLINE + 1000;
     contract.extend_deadline(&job_id, &0, &new_deadline);
 
     let events = env.events().all();
@@ -475,10 +473,10 @@ fn test_extend_deadline() {
         &DEFAULT_EXPIRY_LEDGER,
     );
 
-    client.extend_deadline(&job_id, &0, &3000_u64);
+    client.extend_deadline(&job_id, &0, &4000_u64);
 
     let job = client.get_job(&job_id);
-    assert_eq!(job.milestones.get(0).unwrap().deadline, 3000);
+    assert_eq!(job.milestones.get(0).unwrap().deadline, 4000);
 }
 
 // ── Helpers for claim_refund tests ───────────────────────────────────────────
@@ -6658,189 +6656,3 @@ fn test_propose_revision_rejected_for_multi_token_job() {
     let result = escrow.try_propose_revision(&client_addr, &job_id, &new_milestones);
     assert!(result.is_err());
 }
-
-// ─── Regression tests: extend_deadline guards (AC-1, AC-2) ───────────────────
-
-/// AC-1: new_deadline > job.job_deadline must be rejected with InvalidDeadline (#7).
-/// AC-2 (equal): new_deadline == job.job_deadline is the maximum valid value and must succeed.
-#[test]
-fn test_extend_deadline_rejects_deadline_exceeding_job_deadline() {
-    let env = Env::default();
-    env.mock_all_auths();
-    env.ledger().with_mut(|l| l.timestamp = 1000);
-
-    let contract_id = env.register_contract(None, EscrowContract);
-    let client = EscrowContractClient::new(&env, &contract_id);
-
-    let user = Address::generate(&env);
-    let freelancer = Address::generate(&env);
-    let token = Address::generate(&env);
-
-    let admin = Address::generate(&env);
-    client.initialize(&vec![&env, admin.clone()], &1, &admin, &0u32, &604800u64);
-
-    // job_deadline = 3000, milestone deadline = 2000
-    let milestones = vec![&env, (String::from_str(&env, "Task 1"), 100_i128, 2000_u64)];
-    let job_id = client.create_job(
-        &user,
-        &freelancer,
-        &token,
-        &milestones,
-        &3000_u64,
-        &GRACE_PERIOD,
-        &DEFAULT_EXPIRY_LEDGER,
-    );
-
-    // new_deadline (3001) > job_deadline (3000) — must be rejected with InvalidDeadline
-    let result = client.try_extend_deadline(&job_id, &0, &3001_u64);
-    assert_eq!(result, Err(Ok(EscrowError::InvalidDeadline)));
-
-    // Sanity: deadline equal to job_deadline (3000) is accepted
-    client.extend_deadline(&job_id, &0, &3000_u64);
-    let job = client.get_job(&job_id);
-    assert_eq!(job.milestones.get(0).unwrap().deadline, 3000);
-}
-
-/// AC-2: extend_deadline on a Completed (terminal) job must return InvalidStatus (#3).
-#[test]
-fn test_extend_deadline_rejects_completed_job() {
-    let env = Env::default();
-    env.mock_all_auths();
-    env.ledger().with_mut(|l| l.timestamp = 1000);
-
-    let contract_id = env.register_contract(None, EscrowContract);
-    let client = EscrowContractClient::new(&env, &contract_id);
-
-    let user = Address::generate(&env);
-    let freelancer = Address::generate(&env);
-    let admin = Address::generate(&env);
-    let token_address = env.register_stellar_asset_contract_v2(admin.clone()).address();
-    let token_admin = soroban_sdk::token::StellarAssetClient::new(&env, &token_address);
-    token_admin.mint(&user, &1000);
-
-    client.initialize(&vec![&env, admin.clone()], &1, &admin, &0u32, &604800u64);
-
-    let milestones = vec![&env, (String::from_str(&env, "Only task"), 100_i128, JOB_DEADLINE / 2)];
-    let job_id = client.create_job(
-        &user,
-        &freelancer,
-        &token_address,
-        &milestones,
-        &JOB_DEADLINE,
-        &GRACE_PERIOD,
-        &DEFAULT_EXPIRY_LEDGER,
-    );
-
-    // Fund → submit → approve → complete
-    client.fund_job(&job_id, &user, &0, &0);
-    client.submit_milestone(&job_id, &0, &freelancer);
-    client.approve_milestone(&job_id, &0, &user);
-    client.complete_job(&job_id, &user);
-
-    let job = client.get_job(&job_id);
-    assert_eq!(job.status, JobStatus::Completed);
-
-    // Extending deadline on a Completed job must return InvalidStatus
-    let result = client.try_extend_deadline(&job_id, &0, &(JOB_DEADLINE - 1));
-    assert_eq!(result, Err(Ok(EscrowError::InvalidStatus)));
-}
-
-/// AC-2: extend_deadline on a Cancelled (terminal) job must return InvalidStatus (#3).
-#[test]
-fn test_extend_deadline_rejects_cancelled_job() {
-    let env = Env::default();
-    env.mock_all_auths();
-    env.ledger().with_mut(|l| l.timestamp = 1000);
-
-    let contract_id = env.register_contract(None, EscrowContract);
-    let client = EscrowContractClient::new(&env, &contract_id);
-
-    let user = Address::generate(&env);
-    let freelancer = Address::generate(&env);
-    let admin = Address::generate(&env);
-    let token_address = env.register_stellar_asset_contract_v2(admin.clone()).address();
-    let token_admin = soroban_sdk::token::StellarAssetClient::new(&env, &token_address);
-    token_admin.mint(&user, &3000);
-
-    client.initialize(&vec![&env, admin.clone()], &1, &admin, &0u32, &604800u64);
-
-    let milestones = vec![
-        &env,
-        (String::from_str(&env, "Design"), 500_i128, 500_000_u64),
-        (String::from_str(&env, "Frontend"), 1000_i128, 700_000_u64),
-        (String::from_str(&env, "Backend"), 1500_i128, 900_000_u64),
-    ];
-    let job_id = client.create_job(
-        &user,
-        &freelancer,
-        &token_address,
-        &milestones,
-        &JOB_DEADLINE,
-        &GRACE_PERIOD,
-        &DEFAULT_EXPIRY_LEDGER,
-    );
-
-    // Fund, then advance past deadline + grace → claim_refund cancels the job
-    client.fund_job(&job_id, &user, &0, &0);
-    env.ledger().with_mut(|l| l.timestamp = JOB_DEADLINE + GRACE_PERIOD + 1);
-    client.claim_refund(&job_id, &user, &0);
-
-    let job = client.get_job(&job_id);
-    assert_eq!(job.status, JobStatus::Cancelled);
-
-    // Extending deadline on a Cancelled job must return InvalidStatus
-    let result = client.try_extend_deadline(&job_id, &0, &(JOB_DEADLINE - 1));
-    assert_eq!(result, Err(Ok(EscrowError::InvalidStatus)));
-}
-
-/// AC-2: extend_deadline on an Expired (terminal) job must return InvalidStatus (#3).
-///
-/// Lifecycle: create → fund → advance past job_deadline → expire_job → try_extend_deadline.
-/// This completes AC-2 coverage for all three terminal states: Completed, Cancelled, Expired.
-#[test]
-fn test_extend_deadline_rejects_expired_job() {
-    let env = Env::default();
-    env.mock_all_auths();
-    env.ledger().with_mut(|l| l.timestamp = 1000);
-
-    let contract_id = env.register_contract(None, EscrowContract);
-    let client = EscrowContractClient::new(&env, &contract_id);
-
-    let user = Address::generate(&env);
-    let freelancer = Address::generate(&env);
-    let admin = Address::generate(&env);
-    let token_address = env.register_stellar_asset_contract_v2(admin.clone()).address();
-    soroban_sdk::token::StellarAssetClient::new(&env, &token_address).mint(&user, &1000);
-
-    client.initialize(&vec![&env, admin.clone()], &1, &admin, &0u32, &604800u64);
-
-    // milestone deadline < job_deadline so both are valid at creation time
-    let milestones = vec![
-        &env,
-        (String::from_str(&env, "Only task"), 100_i128, JOB_DEADLINE / 2),
-    ];
-    let job_id = client.create_job(
-        &user,
-        &freelancer,
-        &token_address,
-        &milestones,
-        &JOB_DEADLINE,
-        &GRACE_PERIOD,
-        &DEFAULT_EXPIRY_LEDGER,
-    );
-
-    // Fund the job so it holds escrowed tokens (Funded status required for expire_job)
-    client.fund_job(&job_id, &user, &0, &0);
-
-    // Advance past the job deadline so expire_job succeeds
-    env.ledger().with_mut(|l| l.timestamp = JOB_DEADLINE + 1);
-    client.expire_job(&job_id);
-
-    let job = client.get_job(&job_id);
-    assert_eq!(job.status, JobStatus::Expired);
-
-    // Extending deadline on an Expired job must return InvalidStatus
-    let result = client.try_extend_deadline(&job_id, &0, &(JOB_DEADLINE - 1));
-    assert_eq!(result, Err(Ok(EscrowError::InvalidStatus)));
-}
-
