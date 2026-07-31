@@ -172,11 +172,6 @@ export function computeRelevanceScore(params: {
     params.freelancerSkills,
     params.jobSkills
   );
-  const categoryScore = categoryAffinityScore(
-    params.jobCategory,
-    params.completedCategories
-  );
-  
   // On-chain signals (with fallback to neutral when unavailable)
   const isFallback = params.isRpcFallback || !params.onChainReputation;
   const tierScore = badgeTierScore(
@@ -222,7 +217,7 @@ export class RecommendationService {
   ) {
     const cacheKey = generateRecommendationsCacheKey(userId, page, limit);
 
-    const { data, hit } = await cache(cacheKey, 60, async () => {
+    const { data } = await cache(cacheKey, 60, async () => {
       // 1. Fetch freelancer's skills and wallet address
       const user = await prisma.user.findUnique({
         where: { id: userId },
@@ -293,7 +288,7 @@ export class RecommendationService {
 
       const uniqueAddresses = [...new Set(clientAddresses)];
       
-      let reputationMap: Map<string, OnChainReputation | null> = new Map();
+      const reputationMap: Map<string, OnChainReputation | null> = new Map();
       let isRpcFallback = false;
 
       try {
@@ -301,7 +296,7 @@ export class RecommendationService {
           try {
             const rep = await ReputationCacheService.getCachedReputation(address);
             return { address, rep };
-          } catch (error) {
+          } catch {
             logger.debug({ address }, "Failed to fetch reputation for client");
             return { address, rep: null };
           }
@@ -350,8 +345,9 @@ export class RecommendationService {
           now,
         });
 
-        // Strip reviewsReceived from client in the response
-        const { reviewsReceived, walletAddress, ...clientData } = job.client as any;
+        // Strip reviewsReceived/walletAddress from client in the response
+        // eslint-disable-next-line @typescript-eslint/no-unused-vars
+        const { reviewsReceived, walletAddress, ...clientData } = job.client;
 
         return {
           ...job,

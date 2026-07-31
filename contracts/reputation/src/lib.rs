@@ -116,6 +116,9 @@ pub enum ReputationError {
     /// guard, a user with an established rating could add themselves as their
     /// own skill endorser and inflate their own `get_skill_score` (issue #987).
     SelfEndorsement = 27,
+    /// Rejected when `claim_stake` finds a positive `StakeBalance` but no
+    /// recorded `StakeToken` for the reviewer (stake predates token tracking).
+    StakeTokenNotFound = 28,
 }
 
 #[contracttype]
@@ -292,6 +295,9 @@ enum DataKey {
     MultiSigProposalCount,
     Leaderboard,
     StakeBalance(Address),
+    /// The token address a reviewer's current `StakeBalance` is denominated in,
+    /// so it can be transferred back correctly on `claim_stake`.
+    StakeToken(Address),
     ReviewAppeal(Address, Address, u64),
     DisputeContract,
     Endorsement(Address, String, Address),
@@ -457,6 +463,13 @@ pub fn apply_lazy_decay(env: &Env, rep: &mut UserReputation) {
     rep.last_updated_ts = current_ts;
 }
 
+/// Applies a 0-100 decay `factor` (percent) to `value` as `value * factor / 100`
+/// using a u128 intermediate so large `value`s (already saturated to u64::MAX)
+/// don't overflow before the division brings the result back under u64::MAX.
+fn scale_by_factor_pct(value: u64, factor: u64) -> u64 {
+    ((value as u128) * (factor as u128) / 100) as u64
+}
+
 fn get_decay_factor(decay_rate: u32, current_time: u64, recorded_at: u64) -> u64 {
     if decay_rate == 0 {
         return 100;
@@ -610,6 +623,14 @@ impl ReputationContract {
             .persistent()
             .extend_ttl(&balance_key, MIN_TTL_THRESHOLD, MIN_TTL_EXTEND_TO);
 
+        // Record which token this stake is denominated in so claim_stake can
+        // transfer the correct asset back.
+        let stake_token_key = DataKey::StakeToken(reviewer.clone());
+        env.storage().persistent().set(&stake_token_key, &job.token);
+        env.storage()
+            .persistent()
+            .extend_ttl(&stake_token_key, MIN_TTL_THRESHOLD, MIN_TTL_EXTEND_TO);
+
         // Saturate stake_weight to u64::MAX instead of truncating to prevent
         // large i128 stakes from wrapping to arbitrary values (issue #982).
         let weight = if stake_weight > 0 {
@@ -640,8 +661,10 @@ impl ReputationContract {
 
         apply_lazy_decay(&env, &mut reputation);
 
-        reputation.total_score += (rating as u64) * weight;
-        reputation.total_weight += weight;
+        reputation.total_score = reputation
+            .total_score
+            .saturating_add((rating as u64).saturating_mul(weight));
+        reputation.total_weight = reputation.total_weight.saturating_add(weight);
         reputation.review_count += 1;
         reputation.last_updated_ts = env.ledger().timestamp() as u32;
 
@@ -1743,9 +1766,10 @@ impl ReputationContract {
             let factor = get_decay_factor(decay_rate, current_ts, review.timestamp);
             // Saturate stake_weight to u64::MAX to prevent truncation (issue #982)
             let clamped_weight = i128::min(review.stake_weight, u64::MAX as i128) as u64;
-            let decayed_weight = (clamped_weight * factor) / 100;
-            total_score += (review.rating as u64) * decayed_weight;
-            total_weight += decayed_weight;
+            let decayed_weight = scale_by_factor_pct(clamped_weight, factor);
+            total_score = total_score
+                .saturating_add((review.rating as u64).saturating_mul(decayed_weight));
+            total_weight = total_weight.saturating_add(decayed_weight);
         }
 
         // Include referral bonuses (stored as ReferralBonusRecord with individual timestamps).
@@ -1758,8 +1782,9 @@ impl ReputationContract {
             for bonus in bonuses.iter() {
                 let factor = get_decay_factor(decay_rate, current_ts, bonus.timestamp);
                 // bonus.amount = bonus_rating * bonus.weight; apply same decay factor.
-                total_score += bonus.amount * factor / 100;
-                total_weight += bonus.weight * factor / 100;
+                total_score = total_score.saturating_add(scale_by_factor_pct(bonus.amount, factor));
+                total_weight =
+                    total_weight.saturating_add(scale_by_factor_pct(bonus.weight, factor));
             }
         }
 
@@ -1865,6 +1890,15 @@ impl ReputationContract {
         multiplier
     }
 
+    /// Returns the raw staked token balance currently held for a reviewer.
+    /// Returns 0 if the reviewer has no active stake.
+    pub fn get_stake_balance(env: Env, user: Address) -> i128 {
+        env.storage()
+            .persistent()
+            .get(&DataKey::StakeBalance(user))
+            .unwrap_or(0)
+    }
+
     pub fn get_average_rating(env: Env, user: Address) -> Result<u64, ReputationError> {
         let multiplier = Self::get_stake_multiplier(env.clone(), user.clone());
 
@@ -1874,8 +1908,8 @@ impl ReputationContract {
             return Ok(0); // If completely decayed, acts as no rep
         }
 
-        let base_score = (total_score * 100) / total_weight;
-        let weighted = (base_score * (multiplier as u64)) / 100;
+        let base_score = ((total_score as u128) * 100 / (total_weight as u128)) as u64;
+        let weighted = scale_by_factor_pct(base_score, multiplier as u64);
         Ok(weighted.min(10_000))
     }
 
@@ -1983,9 +2017,20 @@ impl ReputationContract {
             env.storage().persistent().remove(&balance_key);
         }
 
-        // Transfer tokens back to reviewer
-        let token_client = token::Client::new(&env, &env.current_contract_address());
+        // Transfer tokens back to reviewer, using the token the stake was
+        // actually deposited in (not the reputation contract's own address).
+        let stake_token_key = DataKey::StakeToken(reviewer.clone());
+        let stake_token: Address = env
+            .storage()
+            .persistent()
+            .get(&stake_token_key)
+            .ok_or(ReputationError::StakeTokenNotFound)?;
+        let token_client = token::Client::new(&env, &stake_token);
         token_client.transfer(&env.current_contract_address(), &reviewer, &amount);
+
+        if new_balance <= 0 {
+            env.storage().persistent().remove(&stake_token_key);
+        }
 
         env.events().publish(
             (symbol_short!("reput"), symbol_short!("claim")),

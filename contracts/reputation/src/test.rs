@@ -2938,7 +2938,8 @@ fn test_stake_weight_at_u64_max_saturates() {
     let rep = reputation_client.get_reputation(&reviewee);
     // Weight should be saturated to u64::MAX, not wrapped
     assert_eq!(rep.total_weight, u64::MAX);
-    assert_eq!(rep.total_score, 5 * u64::MAX);
+    // Score (rating * weight) also saturates to u64::MAX rather than overflowing
+    assert_eq!(rep.total_score, u64::MAX);
 }
 
 #[test]
@@ -2975,7 +2976,8 @@ fn test_stake_weight_above_u64_max_saturates() {
     let rep = reputation_client.get_reputation(&reviewee);
     // Weight should be saturated to u64::MAX, not a wrapped/truncated value
     assert_eq!(rep.total_weight, u64::MAX);
-    assert_eq!(rep.total_score, 4 * u64::MAX);
+    // Score (rating * weight) also saturates to u64::MAX rather than overflowing
+    assert_eq!(rep.total_score, u64::MAX);
 }
 
 #[test]
@@ -3661,9 +3663,9 @@ fn setup_review_and_appeal(
     );
 
     // File an appeal
-    reputation_client.file_appeal(
-        reviewee,
+    reputation_client.appeal_review(
         reviewer,
+        reviewee,
         &job_id,
         &String::from_str(env, "This review is unfair"),
     );
@@ -3705,7 +3707,7 @@ fn test_admin_resolve_appeal_remove_review() {
     assert_eq!(rep_after.total_weight, 0);
 
     // Verify appeal status is ReviewRemoved
-    let appeal = reputation_client.get_appeal(&reviewer, &reviewee, &1u64);
+    let appeal = reputation_client.get_review_appeal(&reviewer, &reviewee, &1u64);
     assert_eq!(appeal.status, AppealStatus::ReviewRemoved);
 }
 
@@ -3745,7 +3747,7 @@ fn test_admin_resolve_appeal_dismiss() {
     assert_eq!(rep_after.total_weight, weight_before);
 
     // Verify appeal status is Dismissed
-    let appeal = reputation_client.get_appeal(&reviewer, &reviewee, &1u64);
+    let appeal = reputation_client.get_review_appeal(&reviewer, &reviewee, &1u64);
     assert_eq!(appeal.status, AppealStatus::Dismissed);
 }
 
@@ -3860,9 +3862,9 @@ fn test_admin_resolve_appeal_reputation_accounting() {
         &String::from_str(&env, "Average work"),
         &MIN_STAKE,
     );
-    reputation_client.file_appeal(
-        &reviewee,
+    reputation_client.appeal_review(
         &reviewer2,
+        &reviewee,
         &2u64,
         &String::from_str(&env, "Also unfair"),
     );

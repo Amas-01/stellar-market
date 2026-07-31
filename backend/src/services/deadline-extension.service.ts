@@ -5,13 +5,12 @@
  */
 import {
   PrismaClient,
+  Prisma,
   DeadlineExtensionStatus,
-  JobStatus,
 } from "@prisma/client";
 import { createError } from "../middleware/error";
 import { ContractService } from "./contract.service";
 import { NotificationService } from "./notification.service";
-import { config } from "../config";
 import { logger } from "../lib/logger";
 
 const prisma = new PrismaClient();
@@ -172,7 +171,7 @@ export class DeadlineExtensionService {
 
     // Update approval status
     let newStatus: DeadlineExtensionStatus = DeadlineExtensionStatus.PENDING;
-    let updateData: any = { updatedAt: new Date() };
+    const updateData: Prisma.DeadlineExtensionRequestUpdateInput = { updatedAt: new Date() };
 
     if (isClient) {
       updateData.clientApprovedAt = new Date();
@@ -309,10 +308,21 @@ export class DeadlineExtensionService {
    * Execute the deadline extension on-chain
    * Called after both parties have approved
    */
-  static async executeExtensionOnChain(extensionRequest: any) {
+  static async executeExtensionOnChain(
+    extensionRequest: Prisma.DeadlineExtensionRequestGetPayload<{
+      include: {
+        milestone: true;
+        job: { include: { client: true; freelancer: true } };
+      };
+    }>,
+  ) {
     try {
       const job = extensionRequest.job;
       const milestone = extensionRequest.milestone;
+
+      if (!job.client.walletAddress) {
+        throw createError("Client has no linked wallet address", 400);
+      }
 
       // Build the transaction XDR
       const xdr = await ContractService.buildExtendDeadlineTx(

@@ -17,6 +17,7 @@ import { initYjsServer } from "./socket/yjsServer";
 import { startExpiryJob } from "./jobs/expiry.job";
 import { startPendingTxJob } from "./jobs/pending-tx.job";
 import { startEscrowTtlJob } from "./jobs/escrow-ttl.job";
+import { startEarningsReconciliationJob } from "./jobs/earnings-reconciliation.job";
 import {
   startHorizonListener,
   stopHorizonListener,
@@ -73,8 +74,8 @@ prisma.$use(async (params, next) => {
   try {
     const result = await next(params);
     return result;
-  } catch (err: any) {
-    if (err?.code === "P2024") {
+  } catch (err) {
+    if ((err as { code?: string })?.code === "P2024") {
       poolMetrics.exhaustedCount += 1;
       logger.error(
         { err, model: params.model, action: params.action },
@@ -230,6 +231,7 @@ async function startServer(): Promise<void> {
     startExpiryJob();
     startPendingTxJob();
     startEscrowTtlJob();
+    startEarningsReconciliationJob();
     startHorizonListener();
     RecommendationQueueService.startWorker();
     AuditService.startWorker();

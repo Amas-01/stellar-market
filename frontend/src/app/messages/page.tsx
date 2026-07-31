@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { Suspense, useEffect, useState } from "react";
 import Link from "next/link";
 import { useSearchParams, useRouter } from "next/navigation";
 import { MessageSquare, Search, User, Briefcase } from "lucide-react";
@@ -13,6 +13,14 @@ import MessageSkeleton from "@/components/skeletons/MessageSkeleton";
 import Avatar from "@/components/Avatar";
 
 export default function InboxPage() {
+  return (
+    <Suspense fallback={null}>
+      <InboxPageContent />
+    </Suspense>
+  );
+}
+
+function InboxPageContent() {
   const { token } = useAuth();
   const searchParams = useSearchParams();
   const router = useRouter();

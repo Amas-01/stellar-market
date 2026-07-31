@@ -54,7 +54,26 @@ function startRecommendationWorker(): void {
     }
   });
 
-  logger.info("Recommendation rebuild worker started");
+    const redis = getQueueConnection();
+
+    for (;;) {
+      const rawJob = await redis.lpop(RECOMMENDATION_REBUILD_QUEUE_KEY);
+      if (!rawJob) {
+        break;
+      }
+
+      try {
+        const payload = JSON.parse(rawJob) as RecommendationRebuildJob;
+        await RecommendationService.rebuildRecommendationsForJob(payload.jobId);
+      } catch (error) {
+        logger.error({ err: error }, "Failed to process recommendation rebuild job");
+      }
+    }
+  } catch (error) {
+    logger.warn({ err: error }, "Recommendation rebuild worker is unavailable");
+  } finally {
+    workerRunning = false;
+  }
 }
 
 export class RecommendationQueueService {
