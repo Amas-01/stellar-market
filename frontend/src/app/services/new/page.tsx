@@ -13,7 +13,11 @@ const STORAGE_KEY = "service-form-draft";
 
 export default function NewServicePage() {
   const router = useRouter();
-  const { user, isLoading } = useAuth();
+  // Destructure `token` from useAuth() so the Authorization header uses the
+  // correct key (stellarmarket_jwt) rather than reading the non-existent
+  // localStorage key "token" (issue #950).  token is null when not logged in,
+  // which matches the original guard behaviour.
+  const { user, isLoading, token } = useAuth();
   const { toast } = useToast();
   const [loading, setLoading] = useState(false);
   const [errors, setErrors] = useState<Record<string, string>>({});
@@ -120,8 +124,6 @@ export default function NewServicePage() {
     setErrors({});
 
     try {
-      const token = localStorage.getItem("token");
-      
       await axios.post(
         `${API_URL}/services`,
         {
