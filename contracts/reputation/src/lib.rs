@@ -2362,6 +2362,22 @@ impl ReputationContract {
             env.storage().persistent().remove(&review_exists_key);
         }
 
+        // Resolve any pending appeal on the removed review so both removal
+        // paths (admin_remove_review and admin_resolve_appeal) leave
+        // consistent appeal state (#981).
+        let appeal_key = DataKey::ReviewAppeal(reviewer.clone(), user.clone(), job_id);
+        if let Some(mut appeal) = env
+            .storage()
+            .persistent()
+            .get::<DataKey, ReviewAppeal>(&appeal_key)
+        {
+            if appeal.status == AppealStatus::Pending {
+                appeal.status = AppealStatus::ReviewRemoved;
+                env.storage().persistent().set(&appeal_key, &appeal);
+                bump_review_appeal_ttl(&env, &reviewer, &user, job_id);
+            }
+        }
+
         // Do NOT update legacy accumulators here; recomputation is lazy on next read.
 
         // NOTE: Soroban symbol literals have a hard 9-character limit.
