@@ -26,7 +26,10 @@ import { installRequestIdConsolePatch, logger } from "./lib/logger";
 import { connectWithRetry } from "./lib/db-connect";
 import { getHealthStatus } from "./lib/health";
 import { metricsHandler, requestDurationMiddleware } from "./lib/metrics";
-import { RecommendationQueueService } from "./services/recommendation-queue.service";
+import {
+  RecommendationQueueService,
+  getRecommendationRebuildQueue,
+} from "./services/recommendation-queue.service";
 import { AuditService } from "./services/audit.service";
 import { initializeVirusScanner } from "./utils/virusScanner";
 import { ReputationCacheService } from "./services/reputation-cache.service";

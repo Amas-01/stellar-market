@@ -1,3 +1,4 @@
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
 const capturedQueueOptions: Array<{ name: string; opts: any }> = [];
 
 const queueAddMock = jest.fn();
@@ -6,6 +7,7 @@ const workerOnMock = jest.fn();
 const workerCloseMock = jest.fn().mockResolvedValue(undefined);
 
 jest.mock("bullmq", () => {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const Queue = jest.fn((name: string, opts: any) => {
     capturedQueueOptions.push({ name, opts });
     return {

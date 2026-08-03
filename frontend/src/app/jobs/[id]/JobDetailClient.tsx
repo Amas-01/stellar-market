@@ -105,7 +105,11 @@ const CONFIRM_TYPE_ENDPOINT: Partial<Record<PendingOnChainAction["confirmType"],
   CLAIM_REFUND: "/escrow/init-refund",
 };
 
-export default function JobDetailClient() {
+export default function JobDetailClient({
+  initialJob,
+}: {
+  initialJob?: Job | null;
+}) {
   const { id } = useParams();
   const { address, balances, signAndBroadcastTransaction } = useWallet();
   const { user } = useAuth();
