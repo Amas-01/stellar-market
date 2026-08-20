@@ -3892,3 +3892,156 @@ fn test_admin_resolve_appeal_reputation_accounting() {
     assert_eq!(rep_after_removal.total_score, expected_score_after);
     assert_eq!(rep_after_removal.total_weight, expected_weight_after);
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// #1117 — get_decayed_totals must stay bounded regardless of Reviews vector size
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[test]
+fn test_get_decayed_totals_bounded_by_max_reviews_counted() {
+    let env = Env::default();
+    env.mock_all_auths();
+    // Reading back 250 injected reviews is realistic call volume for a
+    // griefed account but exceeds the default sandbox CPU budget; reset it
+    // so the test exercises the counting/capping logic, not gas accounting.
+    env.budget().reset_unlimited();
+
+    let reputation_id = env.register_contract(None, ReputationContract);
+    let client = ReputationContractClient::new(&env, &reputation_id);
+    let admin = Address::generate(&env);
+    client.initialize(&vec![&env, admin.clone()], &1u32, &0u32); // no decay
+
+    let user = Address::generate(&env);
+    let reviewer = Address::generate(&env);
+
+    // 250 reviews (> MAX_REVIEWS_COUNTED = 200): the oldest 50 are 1-star,
+    // the most recent 200 are 5-star. An unbounded average would be pulled
+    // down by the oldest 50; the bounded computation should read as a pure
+    // 5-star average since only the most recent 200 are scored.
+    env.as_contract(&reputation_id, || {
+        let mut reviews: Vec<Review> = Vec::new(&env);
+        for i in 0..250u64 {
+            let rating = if i < 50 { 1u32 } else { 5u32 };
+            reviews.push_back(Review {
+                reviewer: reviewer.clone(),
+                reviewee: user.clone(),
+                job_id: i,
+                rating,
+                comment: String::from_str(&env, ""),
+                stake_weight: MIN_STAKE,
+                timestamp: 0,
+            });
+        }
+        env.storage()
+            .persistent()
+            .set(&DataKey::Reviews(user.clone()), &reviews);
+        env.storage().persistent().set(
+            &DataKey::Reputation(user.clone()),
+            &UserReputation {
+                user: user.clone(),
+                total_score: 0,
+                total_weight: 0,
+                review_count: 250,
+                last_updated_ts: 0,
+            },
+        );
+    });
+
+    let rep = client.get_reputation(&user);
+    assert_eq!(rep.review_count, 250, "full historical count is still reported");
+    assert_eq!(rep.total_score, 5u64 * MIN_STAKE as u64 * 200);
+    assert_eq!(rep.total_weight, MIN_STAKE as u64 * 200);
+
+    // Pure 5-star average, unaffected by the 50 oldest 1-star reviews.
+    assert_eq!(client.get_average_rating(&user), 500);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// #1117 — per-reviewee rate limit complements the read-side cap above
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[test]
+#[should_panic(expected = "Error(Contract, #12)")]
+fn test_reviewee_rate_limit_blocks_burst_reviews() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let escrow_id = env.register_contract(None, EscrowContract);
+    let reputation_id = env.register_contract(None, ReputationContract);
+    let reputation_client = ReputationContractClient::new(&env, &reputation_id);
+    let admin = Address::generate(&env);
+    reputation_client.initialize(&vec![&env, admin.clone()], &1u32, &0u32);
+
+    let reviewer = Address::generate(&env);
+    let reviewee = Address::generate(&env);
+    let token_admin = Address::generate(&env);
+    let token_addr = create_token(&env, &token_admin);
+    mint(&env, &token_addr, &token_admin, &reviewer, 1_000_000_000);
+
+    setup_completed_job(&env, &escrow_id, 1u64, &reviewer, &reviewee, &token_addr);
+
+    // Simulate `reviewee` already having received MAX_REVIEWS_PER_REVIEWEE_WINDOW
+    // reviews earlier in the current rate-limit window (e.g. from many distinct
+    // reviewers/jobs, so the per-reviewer cooldown alone wouldn't stop a griefer).
+    env.as_contract(&reputation_id, || {
+        env.storage().persistent().set(
+            &DataKey::RevieweeReviewWindow(reviewee.clone()),
+            &(0u32, MAX_REVIEWS_PER_REVIEWEE_WINDOW),
+        );
+    });
+
+    // One more review in the same window is rejected even though `reviewer`
+    // has no prior reviews of their own (their per-reviewer cooldown is clear).
+    reputation_client.submit_review(
+        &escrow_id,
+        &reviewer,
+        &reviewee,
+        &1u64,
+        &5u32,
+        &String::from_str(&env, "Spam"),
+        &MIN_STAKE,
+    );
+}
+
+#[test]
+fn test_reviewee_rate_limit_resets_after_window() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let escrow_id = env.register_contract(None, EscrowContract);
+    let reputation_id = env.register_contract(None, ReputationContract);
+    let reputation_client = ReputationContractClient::new(&env, &reputation_id);
+    let admin = Address::generate(&env);
+    reputation_client.initialize(&vec![&env, admin.clone()], &1u32, &0u32);
+
+    let reviewer = Address::generate(&env);
+    let reviewee = Address::generate(&env);
+    let token_admin = Address::generate(&env);
+    let token_addr = create_token(&env, &token_admin);
+    mint(&env, &token_addr, &token_admin, &reviewer, 1_000_000_000);
+
+    setup_completed_job(&env, &escrow_id, 1u64, &reviewer, &reviewee, &token_addr);
+
+    env.as_contract(&reputation_id, || {
+        env.storage().persistent().set(
+            &DataKey::RevieweeReviewWindow(reviewee.clone()),
+            &(0u32, MAX_REVIEWS_PER_REVIEWEE_WINDOW),
+        );
+    });
+
+    // Advance past the rate-limit window (120 ledgers) so the reviewee-side
+    // count resets and a genuine review is accepted again.
+    env.ledger().with_mut(|l| l.sequence_number = 200);
+
+    reputation_client.submit_review(
+        &escrow_id,
+        &reviewer,
+        &reviewee,
+        &1u64,
+        &5u32,
+        &String::from_str(&env, "Fine"),
+        &MIN_STAKE,
+    );
+
+    assert_eq!(reputation_client.get_review_count(&reviewee), 1);
+}
