@@ -2524,6 +2524,14 @@ impl EscrowContract {
             token_client.transfer(&env.current_contract_address(), &job.freelancer, &freelancer_amount);
         }
 
+        // Record that the full nominal milestone amount has been disbursed so that
+        // EmergencyWithdraw recognises this as the immediate-payment model
+        // (MilestoneDisbursed > 0) and does NOT pay the freelancer a second time.
+        // release_milestone and release_partial_payment do the same thing; omitting
+        // this call here would cause a double-pay if EmergencyWithdraw runs after
+        // finalize_inactivity_approval.
+        record_milestone_disbursed(&env, job_id, milestone.id, milestone.amount);
+
         let updated = Milestone {
             id: milestone.id,
             description: milestone.description.clone(),

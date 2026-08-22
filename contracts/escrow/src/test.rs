@@ -7871,3 +7871,81 @@ fn test_emergency_withdraw_all_deferred_approved_all_to_freelancer() {
         "admin recipient receives nothing when all funds are owed to freelancer"
     );
 }
+
+// -----------------------------------------------------------------
+// Test 6 (regression): inactivity auto-approval — milestone paid via
+// finalize_inactivity_approval, then EmergencyWithdraw is called.
+// Because finalize_inactivity_approval now records MilestoneDisbursed,
+// EmergencyWithdraw must treat the milestone as the immediate-payment
+// model and must NOT pay the freelancer a second time.
+//
+// Setup: 2-milestone job (200 + 300 = 500 total).
+//   - Milestone 0 submitted at t=0; inactivity threshold elapsed (7 days);
+//     trigger_inactivity_approval called; grace period elapsed (3 days);
+//     finalize_inactivity_approval called → freelancer receives 200.
+//   - Milestone 1 still Pending.
+//   - Contract paused → EmergencyWithdraw.
+// Expected: freelancer gets 0 extra (already received 200), recipient gets 300.
+// -----------------------------------------------------------------
+#[test]
+fn test_emergency_withdraw_no_double_pay_after_inactivity_approval() {
+    let env = Env::default();
+    env.mock_all_auths();
+    // Start at t=1000 so timestamps are above zero.
+    env.ledger().with_mut(|l| l.timestamp = 1000);
+
+    let (escrow, _client_addr, freelancer, token_addr, admin, job_id) =
+        setup_emergency_withdraw_job(&env);
+
+    let token = TokenClient::new(&env, &token_addr);
+
+    // Submit milestone 0 at t=1000.
+    escrow.submit_milestone(&job_id, &0_u32, &freelancer);
+
+    // Advance past the 7-day inactivity threshold so trigger is allowed.
+    // INACTIVITY_THRESHOLD_SECS = 7 * 24 * 3600 = 604_800.
+    env.ledger().with_mut(|l| l.timestamp = 1000 + 604_800 + 1);
+
+    // Trigger inactivity (either client or freelancer can call this).
+    escrow.trigger_inactivity_extension(&job_id, &0_u32, &freelancer);
+
+    // Advance past the 3-day grace period so finalise is allowed.
+    // INACTIVITY_GRACE_SECS = 3 * 24 * 3600 = 259_200.
+    env.ledger().with_mut(|l| l.timestamp += 259_200 + 1);
+
+    // Finalise: funds leave escrow → freelancer receives 200.
+    let freelancer_before = token.balance(&freelancer);
+    escrow.finalize_inactivity_approval(&job_id, &0_u32, &freelancer);
+    let freelancer_after_finalize = token.balance(&freelancer);
+
+    assert_eq!(
+        freelancer_after_finalize - freelancer_before,
+        200,
+        "freelancer should receive 200 from finalize_inactivity_approval"
+    );
+
+    // Now pause the contract and run EmergencyWithdraw.
+    // Milestone 0 is Approved with MilestoneDisbursed == 200 (immediate model).
+    // Milestone 1 is Pending (300 still in escrow).
+    // EmergencyWithdraw should give 300 to recipient and 0 extra to freelancer.
+    let recipient = Address::generate(&env);
+    let freelancer_before_withdraw = token.balance(&freelancer);
+    let recipient_before = token.balance(&recipient);
+
+    pause_for_emergency(&env, &escrow, &admin);
+    do_emergency_withdraw(&env, &escrow, &admin, job_id, &recipient);
+
+    let freelancer_after_withdraw = token.balance(&freelancer);
+    let recipient_after = token.balance(&recipient);
+
+    assert_eq!(
+        freelancer_after_withdraw - freelancer_before_withdraw,
+        0,
+        "freelancer must not be double-paid: inactivity-approved milestone already disbursed"
+    );
+    assert_eq!(
+        recipient_after - recipient_before,
+        300,
+        "admin recipient should receive the remaining unapproved escrow balance"
+    );
+}
