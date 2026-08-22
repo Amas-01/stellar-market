@@ -310,6 +310,9 @@ enum DataKey {
     /// Marks a user as banned by an admin. Banned users are excluded from
     /// leaderboard queries.
     BannedUser(Address),
+    /// Tracks (window_start_ledger, count) of reviews received by this
+    /// reviewee within the current rate-limit window (issue #1117).
+    RevieweeReviewWindow(Address),
 }
 
 fn require_not_paused(env: &Env) -> Result<(), ReputationError> {
@@ -370,6 +373,21 @@ const APPEAL_GRACE_WINDOW_SECONDS: u64 = 72 * 60 * 60;
 // `SkillEndorsers` list (and therefore the loop's cost and the returned
 // score) could grow without limit (issue #987).
 const MAX_ENDORSERS_COUNTED: u32 = 30;
+// Bounds how many Review/ReferralBonusRecord entries `get_decayed_totals`
+// scores per user, following the same pattern as `MAX_ENDORSERS_COUNTED`.
+// Without a cap, a griefer could spam low-cost completed jobs/reviews against
+// a single target to grow their `Reviews(user)` vector without bound, making
+// every read of that user's score (get_reputation, get_gov_weight, and
+// dispute's is_eligible_voter) exceed the Soroban instruction budget and
+// silently lock them out of governance/dispute-voting eligibility (issue
+// #1117). Only the most recent entries are scored, since decay already makes
+// older entries contribute the least to the total.
+const MAX_REVIEWS_COUNTED: u32 = 200;
+/// Complementary mitigation for issue #1117: caps how many reviews a single
+/// reviewee can accumulate within one rate-limit window (the same window
+/// used by the existing per-reviewer cooldown), slowing how fast a griefer
+/// can grow a target's Reviews vector in the first place.
+const MAX_REVIEWS_PER_REVIEWEE_WINDOW: u32 = 20;
 
 fn bump_reputation_ttl(env: &Env, user: &Address) {
     env.storage().persistent().extend_ttl(
@@ -580,6 +598,37 @@ impl ReputationContract {
             // Extend TTL for rate limit data
             env.storage().persistent().extend_ttl(
                 &last_ledger_key,
+                MIN_TTL_THRESHOLD,
+                MIN_TTL_EXTEND_TO,
+            );
+
+            // 2b. Per-reviewee rate limit (issue #1117): bounds how many reviews a
+            // single reviewee can accumulate within one rate-limit window, so a
+            // griefer cannot rapidly grow a target's Reviews vector even though
+            // each individual review comes from a different reviewer/job.
+            let window_key = DataKey::RevieweeReviewWindow(reviewee.clone());
+            let (window_start, count): (u32, u32) = env
+                .storage()
+                .persistent()
+                .get(&window_key)
+                .unwrap_or((current_ledger, 0));
+
+            let (window_start, count) = if current_ledger >= window_start.saturating_add(rate_limit)
+            {
+                (current_ledger, 0)
+            } else {
+                (window_start, count)
+            };
+
+            if count >= MAX_REVIEWS_PER_REVIEWEE_WINDOW {
+                return Err(ReputationError::RateLimitExceeded);
+            }
+
+            env.storage()
+                .persistent()
+                .set(&window_key, &(window_start, count + 1));
+            env.storage().persistent().extend_ttl(
+                &window_key,
                 MIN_TTL_THRESHOLD,
                 MIN_TTL_EXTEND_TO,
             );
@@ -1763,29 +1812,42 @@ impl ReputationContract {
         let mut total_score = 0u64;
         let mut total_weight = 0u64;
 
-        for review in reviews.iter() {
-            let factor = get_decay_factor(decay_rate, current_ts, review.timestamp);
-            // Saturate stake_weight to u64::MAX to prevent truncation (issue #982)
-            let clamped_weight = i128::min(review.stake_weight, u64::MAX as i128) as u64;
-            let decayed_weight = scale_by_factor_pct(clamped_weight, factor);
-            total_score = total_score
-                .saturating_add((review.rating as u64).saturating_mul(decayed_weight));
-            total_weight = total_weight.saturating_add(decayed_weight);
+        // Score only the most recent MAX_REVIEWS_COUNTED reviews so this
+        // function's cost stays bounded regardless of how many reviews `user`
+        // has ever received (issue #1117). Reviews are appended in order, so
+        // the tail of the vector is the most recent.
+        let start = review_count.saturating_sub(MAX_REVIEWS_COUNTED);
+        for idx in start..review_count {
+            if let Some(review) = reviews.get(idx) {
+                let factor = get_decay_factor(decay_rate, current_ts, review.timestamp);
+                // Saturate stake_weight to u64::MAX to prevent truncation (issue #982)
+                let clamped_weight = i128::min(review.stake_weight, u64::MAX as i128) as u64;
+                let decayed_weight = scale_by_factor_pct(clamped_weight, factor);
+                total_score = total_score
+                    .saturating_add((review.rating as u64).saturating_mul(decayed_weight));
+                total_weight = total_weight.saturating_add(decayed_weight);
+            }
         }
 
-        // Include referral bonuses (stored as ReferralBonusRecord with individual timestamps).
+        // Include referral bonuses (stored as ReferralBonusRecord with individual timestamps),
+        // similarly bounded to the most recent MAX_REVIEWS_COUNTED entries.
         let bonuses_key = DataKey::ReferralBonusList(user.clone());
         if let Some(bonuses) = env
             .storage()
             .persistent()
             .get::<DataKey, Vec<ReferralBonusRecord>>(&bonuses_key)
         {
-            for bonus in bonuses.iter() {
-                let factor = get_decay_factor(decay_rate, current_ts, bonus.timestamp);
-                // bonus.amount = bonus_rating * bonus.weight; apply same decay factor.
-                total_score = total_score.saturating_add(scale_by_factor_pct(bonus.amount, factor));
-                total_weight =
-                    total_weight.saturating_add(scale_by_factor_pct(bonus.weight, factor));
+            let bonus_count = bonuses.len() as u32;
+            let start = bonus_count.saturating_sub(MAX_REVIEWS_COUNTED);
+            for idx in start..bonus_count {
+                if let Some(bonus) = bonuses.get(idx) {
+                    let factor = get_decay_factor(decay_rate, current_ts, bonus.timestamp);
+                    // bonus.amount = bonus_rating * bonus.weight; apply same decay factor.
+                    total_score =
+                        total_score.saturating_add(scale_by_factor_pct(bonus.amount, factor));
+                    total_weight =
+                        total_weight.saturating_add(scale_by_factor_pct(bonus.weight, factor));
+                }
             }
         }
 

@@ -53,13 +53,14 @@ jest.mock("@/constants/jobs", () => ({
 }));
 
 import { QueryClient, QueryClientProvider, useQueryClient } from "@tanstack/react-query";
+import type { Job } from "@/types";
 
 function makeApp(children: React.ReactNode, queryClient?: QueryClient) {
   const qc = queryClient ?? new QueryClient({ defaultOptions: { queries: { retry: false } } });
   return <QueryClientProvider client={qc}>{children}</QueryClientProvider>;
 }
 
-function buildJob(override: object = {}) {
+function buildJob(override: Partial<Job> = {}): Job {
   return {
     id: "job-1",
     title: "Test Job",
@@ -69,11 +70,11 @@ function buildJob(override: object = {}) {
     skills: [],
     status: "OPEN",
     escrowStatus: "UNFUNDED",
-    contractJobId: null,
+    contractJobId: undefined,
     createdAt: new Date().toISOString(),
     deadline: new Date().toISOString(),
-    client: { id: "client-1", username: "Client", walletAddress: "GCLIENT_WALLET", bio: "" },
-    freelancer: null,
+    client: { id: "client-1", username: "Client", walletAddress: "GCLIENT_WALLET", bio: "", role: "CLIENT" },
+    freelancer: undefined,
     milestones: [],
     revisionProposal: null,
     ...override,
@@ -108,7 +109,7 @@ describe("JobDetailClient initialData dedup fetch (#972)", () => {
 
     // Job endpoint should NOT have been called — initialData was used
     const jobCalls = mockedAxios.get.mock.calls.filter(
-      ([url]: [string]) => url.includes("/jobs/job-1") && !url.includes("applications"),
+      ([url]) => url.includes("/jobs/job-1") && !url.includes("applications"),
     );
     expect(jobCalls).toHaveLength(0);
   });
@@ -148,7 +149,7 @@ describe("JobDetailClient initialData dedup fetch (#972)", () => {
 
     // Job endpoint should have been called once (after invalidation)
     const jobCalls = mockedAxios.get.mock.calls.filter(
-      ([url]: [string]) => url.includes("/jobs/job-1") && !url.includes("applications"),
+      ([url]) => url.includes("/jobs/job-1") && !url.includes("applications"),
     );
     expect(jobCalls).toHaveLength(1);
   });
