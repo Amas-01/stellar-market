@@ -47,10 +47,10 @@ pub enum DisputeError {
     AppealNotFound = 21,
     NonceReplay = 22,
     DuplicateArbitrator = 23,
-    // Note: Error code 24 (InvalidVoteChoice) was removed as unreachable.
-    // VoteChoice is a #[contracttype] enum; the SDK's deserialization layer
-    // traps on invalid discriminants before the function body executes, so
-    // no code path could ever construct or return this error variant.
+    InvalidArbitrator = 24,
+    ExclusionNotConfirmed = 25,
+    ReplacementUnavailable = 26,
+    InsufficientActiveArbitrators = 27,
 }
 
 #[contracttype]
@@ -273,6 +273,7 @@ enum DataKey {
     Evidence(u64),
     /// Caches the intended `DisputeResolution` when the escrow callback fails; cleared on retry success.
     PendingResolution(u64),
+    ExclusionProposal(u64, Address),
 }
 
 fn require_not_paused(env: &Env) -> Result<(), DisputeError> {
@@ -681,6 +682,25 @@ fn select_arbitrators(
     selected
 }
 
+fn select_replacement_arbitrator(env: &Env, dispute: &Dispute) -> Option<Address> {
+    let pool: Vec<Address> = env
+        .storage()
+        .instance()
+        .get(&DataKey::ArbitratorPool)
+        .unwrap_or(Vec::new(env));
+
+    for candidate in pool.iter() {
+        if candidate != dispute.client
+            && candidate != dispute.freelancer
+            && !dispute.assigned_arbitrators.contains(&candidate)
+            && !dispute.excluded_voters.contains(&candidate)
+        {
+            return Some(candidate);
+        }
+    }
+    None
+}
+
 #[contract]
 pub struct DisputeContract;
 
@@ -847,7 +867,7 @@ impl DisputeContract {
         initiator: Address,
         reason: String,
         min_votes: u32,
-        tie_break_method: Option<TieBreakMethod>,
+        _tie_break_method: Option<TieBreakMethod>,
     ) -> Result<u64, DisputeError> {
         initiator.require_auth();
         require_not_paused(&env)?;
@@ -922,7 +942,7 @@ impl DisputeContract {
             votes_for_malicious: 0,
             votes_for_split_award: 0,
             min_votes: if min_votes < AUTO_RESOLVE_VOTE_THRESHOLD { AUTO_RESOLVE_VOTE_THRESHOLD } else { min_votes },
-            tie_break_method: tie_break_method.unwrap_or(TieBreakMethod::RefundBoth),
+            tie_break_method: TieBreakMethod::RefundBoth,
             created_at: env.ledger().timestamp(),
             voting_deadline: env.ledger().timestamp().saturating_add(VOTING_PERIOD_SECS),
             excluded_voters,
@@ -1212,8 +1232,8 @@ impl DisputeContract {
         Ok(())
     }
 
-    /// Add a voter to the exclusion list for a dispute (only during Open status).
-    /// Can only be called by the client or freelancer involved in the dispute.
+    /// Propose or confirm an assigned arbitrator's exclusion while voting is open.
+    /// Both parties must agree and an eligible replacement must be available.
     pub fn add_excluded_voter(
         env: Env,
         dispute_id: u64,
@@ -1240,16 +1260,43 @@ impl DisputeContract {
             return Err(DisputeError::VotingClosed);
         }
 
-        // Add voter to excluded list if not already present
-        if !dispute.excluded_voters.contains(&voter) {
-            dispute.excluded_voters.push_back(voter.clone());
+        if !dispute.assigned_arbitrators.contains(&voter) {
+            return Err(DisputeError::InvalidArbitrator);
         }
 
-        // Store updated dispute
+        let proposal_key = DataKey::ExclusionProposal(dispute_id, voter.clone());
+        let proposer: Option<Address> = env.storage().persistent().get(&proposal_key);
+        if proposer.is_none() {
+            env.storage().persistent().set(&proposal_key, &caller);
+            return Ok(());
+        }
+        if proposer == Some(caller) {
+            return Err(DisputeError::ExclusionNotConfirmed);
+        }
+
+        let replacement = select_replacement_arbitrator(&env, &dispute)
+            .ok_or(DisputeError::ReplacementUnavailable)?;
+        let mut updated_arbitrators = Vec::<Address>::new(&env);
+        for assigned in dispute.assigned_arbitrators.iter() {
+            if assigned == voter {
+                updated_arbitrators.push_back(replacement.clone());
+            } else {
+                updated_arbitrators.push_back(assigned);
+            }
+        }
+        dispute.excluded_voters.push_back(voter.clone());
+        dispute.assigned_arbitrators = updated_arbitrators.clone();
+        dispute.arbitrator_count = updated_arbitrators.len();
+
         env.storage()
             .persistent()
             .set(&DataKey::Dispute(dispute_id), &dispute);
+        env.storage()
+            .persistent()
+            .set(&DataKey::Arbitrators(dispute_id), &updated_arbitrators);
+        env.storage().persistent().remove(&proposal_key);
         bump_dispute_ttl(&env, dispute_id);
+        bump_arbitrators_ttl(&env, dispute_id);
 
         // Emit event
         env.events().publish(
@@ -1260,6 +1307,7 @@ impl DisputeContract {
                 dispute.job_id,
                 dispute.client,
                 dispute.freelancer,
+                replacement,
             ),
         );
 
@@ -1306,6 +1354,16 @@ impl DisputeContract {
 
         if env.ledger().timestamp() < dispute.voting_deadline {
             return Err(DisputeError::VotingPeriodNotExpired);
+        }
+
+        let mut active_arbitrators = 0u32;
+        for arbitrator in dispute.assigned_arbitrators.iter() {
+            if !dispute.excluded_voters.contains(&arbitrator) {
+                active_arbitrators = active_arbitrators.saturating_add(1);
+            }
+        }
+        if active_arbitrators < AUTO_RESOLVE_VOTE_THRESHOLD {
+            return Err(DisputeError::InsufficientActiveArbitrators);
         }
 
         internal_resolve(&env, dispute_id, &mut dispute, &escrow_addr, true)
