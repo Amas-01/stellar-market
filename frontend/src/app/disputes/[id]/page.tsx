@@ -1,68 +1,73 @@
 "use client";
 
-import { useState, useEffect, useCallback } from "react";
+import { useState } from "react";
 import { useParams } from "next/navigation";
 import Link from "next/link";
 import { ArrowLeft, CheckCircle, AlertCircle, Loader2, ShieldCheck, User as UserIcon } from "lucide-react";
 import axios, { AxiosError } from "axios";
 import { useWallet } from "@/context/WalletContext";
 import { useAuth } from "@/context/AuthContext";
-import { Dispute, Vote } from "@/types";
+import { Vote } from "@/types";
 import DisputeVoteProgress from "@/components/DisputeVoteProgress";
 import EvidenceViewer from "@/components/EvidenceViewer";
 import EvidenceUpload from "@/components/EvidenceUpload";
 import DisputeOutcomeBanner from "@/components/DisputeOutcomeBanner";
 import DisputeTimeline from "@/components/DisputeTimeline";
 import { DisputeOpenedElapsed, VoteDeadlineCountdown } from "@/components/DisputeElapsedTime";
-import { useDisputeStream } from "@/hooks/useDisputeStream";
+import {
+  DisputeStateProvider,
+  useDisputeState,
+} from "@/context/DisputeStateContext";
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:5000/api/v1";
 
+/**
+ * Page wrapper: establishes the single shared dispute-state source (#1126) that
+ * the page body, the vote-progress sidebar, and the arbitrator view all read
+ * from. No component below fetches or polls dispute state independently.
+ */
 export default function DisputeDetailPage() {
+  const { id } = useParams();
+  return (
+    <DisputeStateProvider disputeId={id as string}>
+      <DisputeDetailContent />
+    </DisputeStateProvider>
+  );
+}
+
+function DisputeDetailContent() {
   const { id } = useParams();
   const { signAndBroadcastTransaction } = useWallet();
   const { user } = useAuth();
-  
-  const [dispute, setDispute] = useState<Dispute | null>(null);
-  const [loading, setLoading] = useState(true);
+
+  // All dispute/vote state comes from the one shared source of truth.
+  const {
+    dispute,
+    loading,
+    error: fetchError,
+    refetch,
+    timelineEvents,
+    isLive,
+    canResolve,
+  } = useDisputeState();
+
   const [processing, setProcessing] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  
+  // Errors from the viewer's own actions (vote/resolve), kept separate from the
+  // shared fetch error so one doesn't clobber the other.
+  const [actionError, setActionError] = useState<string | null>(null);
+
   const [voteChoice, setVoteChoice] = useState<"CLIENT" | "FREELANCER" | null>(null);
   const [voteReason, setVoteReason] = useState("");
 
-  const fetchDispute = useCallback(async () => {
-    try {
-      const token = localStorage.getItem("token");
-      const res = await axios.get(`${API_URL}/disputes/${id}`, {
-        headers: token ? { Authorization: `Bearer ${token}` } : {},
-      });
-      setDispute(res.data);
-    } catch {
-      setError("Failed to fetch dispute details.");
-    } finally {
-      setLoading(false);
-    }
-  }, [id]);
-
-  useEffect(() => {
-    fetchDispute();
-  }, [fetchDispute]);
-
-  const { events: timelineEvents, isLive } = useDisputeStream(id as string, {
-    enabled: Boolean(dispute),
-    onEvent: () => {
-      fetchDispute();
-    },
-  });
+  const error = actionError ?? fetchError;
 
   const handleVote = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!voteChoice) return setError("Please select a side to vote for.");
-    if (voteReason.length < 10) return setError("Please provide a reason for your vote.");
+    if (!voteChoice) return setActionError("Please select a side to vote for.");
+    if (voteReason.length < 10) return setActionError("Please provide a reason for your vote.");
 
     setProcessing(true);
-    setError(null);
+    setActionError(null);
 
     try {
       const token = localStorage.getItem("token");
@@ -101,7 +106,8 @@ export default function DisputeDetailPage() {
 
       setVoteChoice(null);
       setVoteReason("");
-      fetchDispute();
+      // Refetch through the shared, staleness-guarded path.
+      refetch();
     } catch (err: unknown) {
       let errorMsg = "An error occurred";
       if (err instanceof AxiosError) {
@@ -109,7 +115,7 @@ export default function DisputeDetailPage() {
       } else if (err instanceof Error) {
         errorMsg = err.message;
       }
-      setError(errorMsg);
+      setActionError(errorMsg);
     } finally {
       setProcessing(false);
     }
@@ -117,7 +123,7 @@ export default function DisputeDetailPage() {
 
   const handleResolve = async () => {
     setProcessing(true);
-    setError(null);
+    setActionError(null);
 
     try {
       const token = localStorage.getItem("token");
@@ -152,7 +158,7 @@ export default function DisputeDetailPage() {
         { headers: { Authorization: `Bearer ${token}` } }
       );
 
-      fetchDispute();
+      refetch();
     } catch (err: unknown) {
       let errorMsg = "An error occurred";
       if (err instanceof AxiosError) {
@@ -160,7 +166,7 @@ export default function DisputeDetailPage() {
       } else if (err instanceof Error) {
         errorMsg = err.message;
       }
-      setError(errorMsg);
+      setActionError(errorMsg);
     } finally {
       setProcessing(false);
     }
@@ -185,11 +191,6 @@ export default function DisputeDetailPage() {
 
   const isParticipant = user?.id === dispute.initiator.id || user?.id === dispute.respondent.id;
   const hasVoted = dispute.votes.some((v: Vote) => v.voter.walletAddress === user?.walletAddress);
-  const totalVotes = dispute.votesForClient + dispute.votesForFreelancer;
-  const canResolve = totalVotes >= dispute.minVotes && (dispute.status === "OPEN" || dispute.status === "VOTING");
-  
-  const clientWidth = totalVotes > 0 ? (dispute.votesForClient / totalVotes) * 100 : 50;
-  const freelancerWidth = totalVotes > 0 ? (dispute.votesForFreelancer / totalVotes) * 100 : 50;
 
   return (
     <div className="max-w-5xl mx-auto px-4 sm:px-6 lg:px-8 py-12">
@@ -231,7 +232,7 @@ export default function DisputeDetailPage() {
             <h1 className="text-2xl font-bold text-theme-heading mb-6">
               Dispute Evidence & Reason
             </h1>
-            
+
             <div className="p-4 bg-theme-bg-secondary rounded-lg border border-theme-border mb-6">
               <div className="flex items-center gap-2 mb-2">
                 <UserIcon size={16} className="text-theme-text" />
@@ -248,7 +249,7 @@ export default function DisputeDetailPage() {
                 {dispute.reason}
               </p>
             </div>
-            
+
             <EvidenceViewer disputeId={dispute.id} />
 
             {isParticipant &&
@@ -257,7 +258,7 @@ export default function DisputeDetailPage() {
                 <div className="card">
                   <EvidenceUpload
                     disputeId={dispute.id}
-                    onUploadComplete={fetchDispute}
+                    onUploadComplete={refetch}
                   />
                 </div>
               )}
@@ -265,7 +266,7 @@ export default function DisputeDetailPage() {
             <h2 className="text-xl font-bold text-theme-heading mb-4 border-b border-theme-border pb-2">
               Community Votes
             </h2>
-            
+
             {dispute.votes.length === 0 ? (
                 <div className="text-center p-8 text-theme-text italic">No votes have been cast yet.</div>
             ) : (
@@ -286,7 +287,7 @@ export default function DisputeDetailPage() {
                   ))}
                 </div>
             )}
-            
+
           </div>
         </div>
 
@@ -294,9 +295,9 @@ export default function DisputeDetailPage() {
         <div className="space-y-6">
           <DisputeTimeline events={timelineEvents} isLive={isLive} />
 
-          {/* Real-time Vote Progress Component */}
-          <DisputeVoteProgress disputeId={id as string} showVoterDetails={true} />
-          
+          {/* Vote progress reads the SAME shared state as the resolve gate. */}
+          <DisputeVoteProgress showVoterDetails={true} />
+
           <div className="card">
             <h3 className="font-semibold text-theme-heading mb-4 flex items-center gap-2">
               <ShieldCheck className="text-stellar-blue" size={18} />
@@ -324,7 +325,7 @@ export default function DisputeDetailPage() {
               )}
             </div>
           </div>
-          
+
           <div className="card border-theme-border border-2">
             <h3 className="font-semibold text-theme-heading mb-4 flex items-center justify-center gap-2 text-lg">
               <ShieldCheck className="text-stellar-blue" />
@@ -332,7 +333,7 @@ export default function DisputeDetailPage() {
             </h3>
 
             {canResolve && !isParticipant && (
-                <button 
+                <button
                   onClick={handleResolve}
                   disabled={processing}
                   className="btn-primary w-full flex justify-center py-3 mb-4 text-sm font-semibold shadow-[0_0_15px_rgba(42,92,246,0.3)] animate-pulse"
@@ -361,8 +362,8 @@ export default function DisputeDetailPage() {
                         type="button"
                         onClick={() => setVoteChoice("CLIENT")}
                         className={`py-2 px-3 rounded-lg text-sm font-medium border transition-colors ${
-                            voteChoice === "CLIENT" 
-                            ? "bg-stellar-blue/20 border-stellar-blue text-stellar-blue" 
+                            voteChoice === "CLIENT"
+                            ? "bg-stellar-blue/20 border-stellar-blue text-stellar-blue"
                             : "bg-theme-bg border-theme-border text-theme-text hover:border-indigo-500/50"
                         }`}
                     >
@@ -372,25 +373,25 @@ export default function DisputeDetailPage() {
                         type="button"
                         onClick={() => setVoteChoice("FREELANCER")}
                         className={`py-2 px-3 rounded-lg text-sm font-medium border transition-colors ${
-                            voteChoice === "FREELANCER" 
-                            ? "bg-theme-warning/20 border-theme-warning text-theme-warning" 
+                            voteChoice === "FREELANCER"
+                            ? "bg-theme-warning/20 border-theme-warning text-theme-warning"
                             : "bg-theme-bg border-theme-border text-theme-text hover:border-orange-500/50"
                         }`}
                     >
                         For Freelancer
                     </button>
                   </div>
-                  
-                  <textarea 
+
+                  <textarea
                     className="input-field min-h-[80px] text-sm resize-none"
                     placeholder="Provide reasoning for your decision..."
                     value={voteReason}
                     onChange={(e) => setVoteReason(e.target.value)}
                     disabled={processing || !voteChoice}
                   />
-                  
-                  <button 
-                    type="submit" 
+
+                  <button
+                    type="submit"
                     className="btn-primary w-full"
                     disabled={processing || !voteChoice || voteReason.length < 10}
                   >

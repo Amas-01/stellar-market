@@ -1,9 +1,9 @@
 "use client";
 
-import { useState, useEffect } from "react";
+import { useState, useMemo } from "react";
 import { ExternalLink, Loader2, Scale, Shield, TrendingUp } from "lucide-react";
-import axios from "axios";
 import type { Dispute } from "@/types";
+import { useOptionalDisputeState } from "@/context/DisputeStateContext";
 
 interface ArbitratorVoteViewProps {
   dispute: Dispute;
@@ -32,8 +32,6 @@ interface DisputeTally {
   }>;
 }
 
-const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:5000/api/v1";
-
 export default function ArbitratorVoteView({
   dispute,
   walletAddress,
@@ -43,8 +41,14 @@ export default function ArbitratorVoteView({
   const [clientPct, setClientPct] = useState(50);
   const [submitting, setSubmitting] = useState(false);
   const [submitError, setSubmitError] = useState<string | null>(null);
-  const [tally, setTally] = useState<DisputeTally | null>(null);
-  const [loadingTally, setLoadingTally] = useState(false);
+
+  // Read the single shared dispute state (issue #1126) when rendered on the
+  // dispute page; fall back to the `dispute` prop otherwise. This replaces the
+  // component's former independent 30s `/tally` poll, so the tally shown here can
+  // never disagree with the rest of the page.
+  const shared = useOptionalDisputeState();
+  const liveDispute = shared?.dispute ?? dispute;
+  const loadingTally = shared ? shared.loading : false;
 
   const isArbitrator =
     !!walletAddress &&
@@ -52,30 +56,30 @@ export default function ArbitratorVoteView({
 
   const freelancerPct = 100 - clientPct;
 
-  // Fetch tally on mount and every 30 seconds
-  useEffect(() => {
-    if (!isArbitrator) return;
-
-    const fetchTally = async () => {
-      setLoadingTally(true);
-      try {
-        const token = localStorage.getItem("token");
-        const response = await axios.get<DisputeTally>(
-          `${API_URL}/disputes/${dispute.id}/tally`,
-          { headers: { Authorization: `Bearer ${token}` } },
-        );
-        setTally(response.data);
-      } catch (err) {
-        console.error("Failed to fetch tally:", err);
-      } finally {
-        setLoadingTally(false);
-      }
+  // Derive the tally from the shared dispute rather than a separate fetch, so
+  // there is exactly one source of vote/status truth on the page.
+  const tally = useMemo<DisputeTally | null>(() => {
+    if (!isArbitrator || !liveDispute) return null;
+    const votesForClient = liveDispute.votesForClient ?? 0;
+    const votesForFreelancer = liveDispute.votesForFreelancer ?? 0;
+    const totalVotes = votesForClient + votesForFreelancer;
+    return {
+      disputeId: liveDispute.id,
+      totalVotes,
+      votesForClient,
+      votesForFreelancer,
+      clientPercentage: totalVotes > 0 ? (votesForClient / totalVotes) * 100 : 0,
+      freelancerPercentage:
+        totalVotes > 0 ? (votesForFreelancer / totalVotes) * 100 : 0,
+      status: liveDispute.status,
+      votes: (liveDispute.votes ?? []).map((v) => ({
+        voterId: v.voterId,
+        voterName: v.voter?.username ?? "Anonymous",
+        choice: v.choice,
+        timestamp: v.createdAt,
+      })),
     };
-
-    fetchTally();
-    const interval = setInterval(fetchTally, 30000);
-    return () => clearInterval(interval);
-  }, [dispute.id, isArbitrator]);
+  }, [isArbitrator, liveDispute]);
 
   const handleClientSlider = (val: number) => {
     setClientPct(val);
