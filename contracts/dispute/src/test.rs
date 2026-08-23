@@ -1366,6 +1366,10 @@ fn test_force_resolve_timeout_tie_break_success() {
 
     client.initialize(&admin, &reputation_contract_id, &300, &escrow_contract_id);
 
+    for _ in 0..5 {
+        client.add_arbitrator(&admin, &Address::generate(&env));
+    }
+
     let user_client = Address::generate(&env);
     let freelancer = Address::generate(&env);
 
@@ -1383,7 +1387,120 @@ fn test_force_resolve_timeout_tie_break_success() {
     env.ledger().with_mut(|l| l.timestamp = 605_801);
 
     let status = client.force_resolve_timeout(&dispute_id);
-    assert_eq!(status, DisputeStatus::ResolvedForClient);
+    assert_eq!(status, DisputeStatus::RefundedBoth);
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #27)")]
+fn test_force_resolve_timeout_rejects_inactive_panel() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().with_mut(|l| l.timestamp = 1000);
+    let dispute_contract_id = env.register_contract(None, DisputeContract);
+    let client = DisputeContractClient::new(&env, &dispute_contract_id);
+    let escrow_contract_id = env.register_contract(None, DummyEscrow);
+    let reputation_contract_id = env.register_contract(None, MockReputationContract);
+    let admin = Address::generate(&env);
+    client.initialize(&admin, &reputation_contract_id, &300, &escrow_contract_id);
+    for _ in 0..5 {
+        client.add_arbitrator(&admin, &Address::generate(&env));
+    }
+    let user_client = Address::generate(&env);
+    let freelancer = Address::generate(&env);
+    let dispute_id = client.raise_dispute(
+        &1u64, &user_client, &freelancer, &user_client,
+        &String::from_str(&env, "Issue"), &5u32, &None,
+    );
+    let assigned = client.get_assigned_arbitrators(&dispute_id);
+    client.remove_arbitrator(&admin, &assigned.get(0).unwrap());
+    client.remove_arbitrator(&admin, &assigned.get(1).unwrap());
+    client.remove_arbitrator(&admin, &assigned.get(2).unwrap());
+    env.ledger().with_mut(|l| l.timestamp = 605_801);
+    client.force_resolve_timeout(&dispute_id);
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #24)")]
+fn test_excluded_voter_must_be_assigned_arbitrator() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let dispute_contract_id = env.register_contract(None, DisputeContract);
+    let client = DisputeContractClient::new(&env, &dispute_contract_id);
+    let escrow_contract_id = env.register_contract(None, DummyEscrow);
+    let reputation_contract_id = env.register_contract(None, MockReputationContract);
+    let admin = Address::generate(&env);
+    client.initialize(&admin, &reputation_contract_id, &300, &escrow_contract_id);
+    for _ in 0..5 {
+        client.add_arbitrator(&admin, &Address::generate(&env));
+    }
+    let user_client = Address::generate(&env);
+    let freelancer = Address::generate(&env);
+    let dispute_id = client.raise_dispute(
+        &1u64, &user_client, &freelancer, &user_client,
+        &String::from_str(&env, "Issue"), &5u32, &None,
+    );
+    client.add_excluded_voter(&dispute_id, &user_client, &Address::generate(&env));
+}
+
+#[test]
+fn test_exclusion_requires_both_parties_and_replaces_arbitrator() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let dispute_contract_id = env.register_contract(None, DisputeContract);
+    let client = DisputeContractClient::new(&env, &dispute_contract_id);
+    let escrow_contract_id = env.register_contract(None, DummyEscrow);
+    let reputation_contract_id = env.register_contract(None, MockReputationContract);
+    let admin = Address::generate(&env);
+    client.initialize(&admin, &reputation_contract_id, &300, &escrow_contract_id);
+    for _ in 0..6 {
+        client.add_arbitrator(&admin, &Address::generate(&env));
+    }
+    let user_client = Address::generate(&env);
+    let freelancer = Address::generate(&env);
+    let dispute_id = client.raise_dispute(
+        &1u64, &user_client, &freelancer, &user_client,
+        &String::from_str(&env, "Issue"), &5u32, &None,
+    );
+    let assigned = client.get_assigned_arbitrators(&dispute_id);
+    let excluded = assigned.get(0).unwrap();
+    client.add_excluded_voter(&dispute_id, &user_client, &excluded);
+    assert!(!client.is_excluded_voter(&dispute_id, &excluded));
+    client.add_excluded_voter(&dispute_id, &freelancer, &excluded);
+    let updated = client.get_dispute(&dispute_id);
+    assert!(updated.excluded_voters.contains(&excluded));
+    assert_eq!(updated.assigned_arbitrators.len(), 5);
+    assert!(!updated.assigned_arbitrators.contains(&excluded));
+}
+
+#[test]
+fn test_timeout_uses_protocol_tie_break_after_exclusion_attempts() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().with_mut(|l| l.timestamp = 1000);
+    let dispute_contract_id = env.register_contract(None, DisputeContract);
+    let client = DisputeContractClient::new(&env, &dispute_contract_id);
+    let escrow_contract_id = env.register_contract(None, DummyEscrow);
+    let reputation_contract_id = env.register_contract(None, MockReputationContract);
+    let admin = Address::generate(&env);
+    client.initialize(&admin, &reputation_contract_id, &300, &escrow_contract_id);
+    for _ in 0..10 {
+        client.add_arbitrator(&admin, &Address::generate(&env));
+    }
+    let user_client = Address::generate(&env);
+    let freelancer = Address::generate(&env);
+    let dispute_id = client.raise_dispute(
+        &1u64, &user_client, &freelancer, &user_client,
+        &String::from_str(&env, "Issue"), &10u32,
+        &Some(TieBreakMethod::FavorClient),
+    );
+    let assigned = client.get_assigned_arbitrators(&dispute_id);
+    for i in 0..assigned.len() {
+        let voter = assigned.get(i).unwrap();
+        client.add_excluded_voter(&dispute_id, &user_client, &voter);
+        client.add_excluded_voter(&dispute_id, &freelancer, &voter);
+    }
+    env.ledger().with_mut(|l| l.timestamp = 605_801);
+    assert_eq!(client.force_resolve_timeout(&dispute_id), DisputeStatus::RefundedBoth);
 }
 
 // ── Party-pair cooldown tests (#530) ─────────────────────────────────────────
@@ -3264,7 +3381,7 @@ fn test_appeal_tie_break_respects_method() {
     client.cast_appeal_vote(&appeal_id, &arb4, &VoteChoice::Freelancer, &String::from_str(&env, "F"));
 
     let appeal_status = client.resolve_appeal(&appeal_id);
-    assert_eq!(appeal_status, AppealStatus::ResolvedForClient);
+    assert_eq!(appeal_status, AppealStatus::RefundedBoth);
 }
 
 #[test]
