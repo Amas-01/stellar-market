@@ -116,6 +116,28 @@ type PendingConfirmation = {
   onChainJobId?: number | string;
 };
 
+// Unique key per action so concurrent approvals on different milestones each
+// get their own slot rather than the latter overwriting the former.
+function confirmActionKey(
+  confirmType: PendingOnChainAction["confirmType"],
+  milestoneId?: string,
+): string {
+  return `${confirmType}:${milestoneId ?? ""}`;
+}
+
+const CONFIRM_TYPE_LABEL: Partial<Record<PendingOnChainAction["confirmType"], string>> = {
+  FUND_JOB: "Fund escrow",
+  APPROVE_MILESTONE: "Approve milestone",
+  CANCEL_JOB: "Cancel and refund",
+  CLAIM_REFUND: "Claim refund",
+  SUBMIT_MILESTONE: "Submit milestone",
+  PROPOSE_REVISION: "Propose revision",
+  ACCEPT_REVISION: "Accept revision",
+  REJECT_REVISION: "Reject revision",
+  EXTEND_DEADLINE: "Extend deadline",
+  CREATE_JOB: "Initialize escrow",
+};
+
 export default function JobDetailClient({
   initialJob,
 }: {
@@ -270,7 +292,7 @@ export default function JobDetailClient({
   >(null);
   const [extendDeadlineDate, setExtendDeadlineDate] = useState<Record<string, string>>({});
   const [pendingOnChainAction, setPendingOnChainAction] = useState<PendingOnChainAction | null>(null);
-  const [pendingConfirmation, setPendingConfirmation] = useState<PendingConfirmation | null>(null);
+  const [pendingConfirmations, setPendingConfirmations] = useState<Record<string, PendingConfirmation>>({});
   const [selectedPaymentToken, setSelectedPaymentToken] = useState<(typeof PAYMENT_TOKENS)[number]>("XLM");
   const [approveMilestoneModalId, setApproveMilestoneModalId] = useState<string | null>(null);
 
@@ -286,12 +308,21 @@ export default function JobDetailClient({
     await queryClient.invalidateQueries({ queryKey: ["applications", id] });
   }, [queryClient, id]);
 
-  // Restore any in-flight confirmation from localStorage on mount so a page
-  // reload after a successful broadcast still shows the retry banner.
+  // Restore any in-flight confirmations from localStorage on mount so page
+  // reloads after a successful broadcast still show the retry banner.
   useEffect(() => {
     try {
-      const raw = localStorage.getItem(`sm_pending_confirm_${String(id)}`);
-      if (raw) setPendingConfirmation(JSON.parse(raw) as PendingConfirmation);
+      const prefix = `sm_pending_confirm_${String(id)}:`;
+      const restored: Record<string, PendingConfirmation> = {};
+      for (let i = 0; i < localStorage.length; i++) {
+        const key = localStorage.key(i);
+        if (!key?.startsWith(prefix)) continue;
+        const raw = localStorage.getItem(key);
+        if (!raw) continue;
+        const conf = JSON.parse(raw) as PendingConfirmation;
+        restored[confirmActionKey(conf.confirmType, conf.milestoneId)] = conf;
+      }
+      if (Object.keys(restored).length > 0) setPendingConfirmations(restored);
     } catch {
       // localStorage unavailable or malformed — ignore
     }
@@ -299,24 +330,34 @@ export default function JobDetailClient({
 
   const savePendingConfirmation = useCallback((conf: PendingConfirmation) => {
     try {
-      localStorage.setItem(`sm_pending_confirm_${String(id)}`, JSON.stringify(conf));
+      const storageKey = `sm_pending_confirm_${String(id)}:${confirmActionKey(conf.confirmType, conf.milestoneId)}`;
+      localStorage.setItem(storageKey, JSON.stringify(conf));
     } catch {
-      // localStorage unavailable — state-only fallback is fine
+      // localStorage unavailable — in-memory state is the fallback
     }
-    setPendingConfirmation(conf);
+    const actionKey = confirmActionKey(conf.confirmType, conf.milestoneId);
+    setPendingConfirmations((prev) => ({ ...prev, [actionKey]: conf }));
   }, [id]);
 
-  const clearPendingConfirmation = useCallback(() => {
-    try {
-      localStorage.removeItem(`sm_pending_confirm_${String(id)}`);
-    } catch {
-      // ignore
-    }
-    setPendingConfirmation(null);
-  }, [id]);
+  const clearPendingConfirmation = useCallback(
+    (confirmType: PendingOnChainAction["confirmType"], milestoneId?: string) => {
+      try {
+        const storageKey = `sm_pending_confirm_${String(id)}:${confirmActionKey(confirmType, milestoneId)}`;
+        localStorage.removeItem(storageKey);
+      } catch {
+        // ignore
+      }
+      const actionKey = confirmActionKey(confirmType, milestoneId);
+      setPendingConfirmations((prev) => {
+        const next = { ...prev };
+        delete next[actionKey];
+        return next;
+      });
+    },
+    [id],
+  );
 
-  const retryConfirmation = useCallback(async () => {
-    if (!pendingConfirmation) return;
+  const retryConfirmation = useCallback(async (conf: PendingConfirmation) => {
     setError(null);
     setProcessing(true);
     try {
@@ -324,39 +365,30 @@ export default function JobDetailClient({
       await axios.post(
         `${API_URL}/escrow/confirm-tx`,
         {
-          hash: pendingConfirmation.hash,
-          type: pendingConfirmation.confirmType,
+          hash: conf.hash,
+          type: conf.confirmType,
           jobId: id,
-          milestoneId: pendingConfirmation.milestoneId,
-          newDeadline: pendingConfirmation.newDeadline,
-          onChainJobId: pendingConfirmation.onChainJobId,
+          milestoneId: conf.milestoneId,
+          newDeadline: conf.newDeadline,
+          onChainJobId: conf.onChainJobId,
         },
         { headers: { Authorization: `Bearer ${token}` } },
       );
-      clearPendingConfirmation();
+      clearPendingConfirmation(conf.confirmType, conf.milestoneId);
       await fetchJob();
-      if (
-        pendingConfirmation.confirmType === "APPROVE_MILESTONE" &&
-        pendingConfirmation.milestoneId
-      ) {
-        setRecentlyApprovedMilestoneId(pendingConfirmation.milestoneId);
+      if (conf.confirmType === "APPROVE_MILESTONE" && conf.milestoneId) {
+        setRecentlyApprovedMilestoneId(conf.milestoneId);
       }
     } catch (err: unknown) {
-      // A 409 means the backend already processed this hash — treat as success.
-      if (axios.isAxiosError(err) && err.response?.status === 409) {
-        clearPendingConfirmation();
-        await fetchJob();
-      } else {
-        setError(
-          err instanceof Error
-            ? err.message
-            : "Confirmation retry failed. Please try again.",
-        );
-      }
+      setError(
+        err instanceof Error
+          ? err.message
+          : "Confirmation retry failed. Please try again.",
+      );
     } finally {
       setProcessing(false);
     }
-  }, [pendingConfirmation, id, clearPendingConfirmation, fetchJob]);
+  }, [id, clearPendingConfirmation, fetchJob]);
 
   const handleApplicationStatus = async (
     appId: string,
@@ -540,7 +572,7 @@ export default function JobDetailClient({
         },
       );
 
-      clearPendingConfirmation();
+      clearPendingConfirmation(action.confirmType, action.milestoneId);
       await fetchJob();
 
       if (
@@ -816,7 +848,7 @@ export default function JobDetailClient({
           { hash: txResult.hash, type: "APPROVE_MILESTONE", jobId: id, milestoneId },
           { headers: { Authorization: `Bearer ${token}` } },
         );
-        clearPendingConfirmation();
+        clearPendingConfirmation("APPROVE_MILESTONE", milestoneId);
         await fetchJob();
         setRecentlyApprovedMilestoneId(milestoneId);
       } catch (confirmErr: unknown) {
@@ -992,30 +1024,33 @@ export default function JobDetailClient({
         <ArrowLeft size={18} /> Back to Jobs
       </Link>
 
-      {pendingConfirmation && (
-        <div className="mb-6 p-4 bg-theme-warning/10 border border-theme-warning/20 rounded-lg flex items-start gap-3">
+      {Object.values(pendingConfirmations).map((conf) => (
+        <div
+          key={confirmActionKey(conf.confirmType, conf.milestoneId)}
+          className="mb-4 p-4 bg-theme-warning/10 border border-theme-warning/20 rounded-lg flex items-start gap-3"
+        >
           <AlertCircle className="flex-shrink-0 mt-0.5 text-theme-warning" size={18} />
           <div className="flex-1 min-w-0">
             <p className="text-sm font-medium text-theme-heading">
-              Transaction broadcast — confirmation pending
+              {CONFIRM_TYPE_LABEL[conf.confirmType] ?? conf.confirmType} — confirmation pending
             </p>
             <p className="text-sm text-theme-text mt-1">
-              Your transaction was sent to the Stellar network but the server has not yet recorded
-              the result. The on-chain action may already be complete. Retry confirmation to sync
-              the status without re-signing or re-broadcasting.
+              The transaction was broadcast to the Stellar network but the server has not yet
+              recorded the result. The on-chain action may already be complete. Retry to sync
+              without re-signing or re-broadcasting.
             </p>
           </div>
           <button
             type="button"
             disabled={processing}
-            onClick={() => void retryConfirmation()}
+            onClick={() => void retryConfirmation(conf)}
             className="flex-shrink-0 btn-primary text-sm py-1.5 px-4 flex items-center gap-2"
           >
             {processing ? <Loader2 className="animate-spin" size={14} /> : null}
             Retry
           </button>
         </div>
-      )}
+      ))}
 
       {error && (
         <div className="mb-6 p-4 bg-theme-error/10 border border-theme-error/20 rounded-lg flex items-start gap-3 text-theme-error">
