@@ -1,4 +1,9 @@
-import { GetObjectCommand, PutObjectCommand, S3Client } from "@aws-sdk/client-s3";
+import {
+  DeleteObjectsCommand,
+  GetObjectCommand,
+  PutObjectCommand,
+  S3Client,
+} from "@aws-sdk/client-s3";
 import fs from "fs";
 import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
 import { config } from "../config";
@@ -43,6 +48,42 @@ export async function uploadEvidenceObject({
       Key: key,
       Body: fs.createReadStream(filePath),
       ContentType: contentType,
+    }),
+  );
+}
+
+/**
+ * Same as `uploadEvidenceObject`, but for bytes already in memory (e.g. one
+ * chunk of a resumable upload) rather than a file on the local disk — so
+ * callers never need to round-trip through a temp file just to hand this
+ * function something it can stream.
+ */
+export async function uploadEvidenceBuffer({
+  key,
+  body,
+  contentType,
+}: {
+  key: string;
+  body: Buffer;
+  contentType: string;
+}): Promise<void> {
+  await getS3Client().send(
+    new PutObjectCommand({
+      Bucket: getBucket(),
+      Key: key,
+      Body: body,
+      ContentType: contentType,
+    }),
+  );
+}
+
+/** Batch-deletes up to 1000 keys in one request. No-op for an empty list. */
+export async function deleteEvidenceObjects(keys: string[]): Promise<void> {
+  if (keys.length === 0) return;
+  await getS3Client().send(
+    new DeleteObjectsCommand({
+      Bucket: getBucket(),
+      Delete: { Objects: keys.map((Key) => ({ Key })), Quiet: true },
     }),
   );
 }

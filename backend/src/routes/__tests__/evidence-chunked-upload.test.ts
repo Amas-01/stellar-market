@@ -1,23 +1,32 @@
 import express from "express";
 import request from "supertest";
 import jwt from "jsonwebtoken";
-import fs from "fs";
-import os from "os";
-import path from "path";
 import crypto from "crypto";
 import { Buffer } from "buffer";
 // Imported here (rather than required inside the jest.mock factory below) using
 // jest's "mock"-prefixed variable exemption so the factory can reference them
 // without violating the out-of-scope-variable restriction on jest.mock factories.
 import * as mockJwt from "jsonwebtoken";
+import {
+  FakeEvidenceObjectStore,
+  FakeRedisStore,
+} from "../../__tests__/testUtils/evidenceSessionFakes";
 
-// Drive the session service to a temp dir and mark storage configured BEFORE any
-// module that reads those values is required.
-const TEMP_SESSION_DIR = fs.mkdtempSync(
-  path.join(os.tmpdir(), "evidence-sessions-"),
-);
-process.env.EVIDENCE_SESSION_DIR = TEMP_SESSION_DIR;
+// The session manifest/chunk-index state lives in Redis and chunk/assembled
+// bytes live in the S3-compatible object store — both mocked below with
+// stateful in-memory fakes, since this test exercises real resumability
+// (partial upload -> status -> resume), which needs get/set/sadd/smembers to
+// actually round-trip. jest.setup.ts's global ../lib/redis stub is stateless
+// and doesn't implement sadd/srem/smembers at all, so it's overridden here.
 process.env.EVIDENCE_S3_BUCKET = "test-bucket";
+
+const fakeRedis = new FakeRedisStore();
+const fakeStore = new FakeEvidenceObjectStore();
+
+jest.mock("../../lib/redis", () => ({
+  __esModule: true,
+  default: { getInstance: () => fakeRedis },
+}));
 
 // `config` is a top-level singleton evaluated at module-load time from
 // process.env — it must be required (not statically imported, which ES
@@ -74,6 +83,13 @@ jest.mock("../../services/evidence-storage.service", () => {
   return {
     ...actual,
     uploadEvidenceObject: jest.fn().mockResolvedValue(undefined),
+    uploadEvidenceBuffer: jest.fn(async ({ key, body }: { key: string; body: Buffer }) => {
+      fakeStore.put(key, body);
+    }),
+    readEvidenceObject: jest.fn(async (key: string) => fakeStore.get(key)),
+    deleteEvidenceObjects: jest.fn(async (keys: string[]) => {
+      fakeStore.delete(keys);
+    }),
   };
 });
 
@@ -148,10 +164,6 @@ function chunkify(buf: Buffer): Buffer[] {
 }
 
 describe("Chunked / resumable evidence upload", () => {
-  afterAll(() => {
-    fs.rmSync(TEMP_SESSION_DIR, { recursive: true, force: true });
-  });
-
   it("uploads a multi-chunk file and records the server-verified hash", async () => {
     const buf = makeFile(CHUNK_SIZE + 1234); // 2 chunks
     const hash = sha256(buf);
