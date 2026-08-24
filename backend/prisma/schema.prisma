@@ -216,6 +216,11 @@ model Job {
   clientId      String
   freelancerId  String?
   contractJobId String?      @unique
+  // Client-supplied key that makes atomic job+milestone creation idempotent:
+  // retrying a partially-failed "Publish Job" reuses the same key, and the
+  // unique constraint guarantees the retry returns the original job instead of
+  // creating a duplicate (issue #1125).
+  idempotencyKey String?     @unique
   escrowStatus  EscrowStatus @default(UNFUNDED)
   skills        String[]
   deadline      DateTime
