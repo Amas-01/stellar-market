@@ -132,7 +132,10 @@ export function DisputeStateProvider({
   const fetchDispute = useCallback(async () => {
     const seq = ++latestSeq.current;
     try {
-      const token = localStorage.getItem("token");
+      // Must match AuthContext's TOKEN_KEY ("stellarmarket_jwt"); the legacy
+      // "token" key is never set, so it would send an unauthenticated request
+      // and 401 for every real user (issue #1126 review).
+      const token = localStorage.getItem("stellarmarket_jwt");
       const res = await axios.get<Dispute>(`${API_URL}/disputes/${disputeId}`, {
         headers: token ? { Authorization: `Bearer ${token}` } : {},
       });
