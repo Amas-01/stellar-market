@@ -245,7 +245,10 @@ export default function JobWizard() {
     const idempotencyKey = getOrCreateIdempotencyKey();
 
     try {
-      const token = localStorage.getItem("token");
+      // Must match AuthContext's TOKEN_KEY ("stellarmarket_jwt"); the legacy
+      // "token" key is never set, so it would send `Bearer null` and 401 for
+      // every real logged-in user (issue #1125 review).
+      const token = localStorage.getItem("stellarmarket_jwt");
 
       // Single atomic call: the backend creates the job and every milestone in
       // one transaction (all-or-nothing), so there is no window in which a job
