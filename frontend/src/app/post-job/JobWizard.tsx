@@ -71,6 +71,35 @@ type FormValues = z.infer<typeof fullSchema>;
 
 const STORAGE_KEY = "job-wizard-draft";
 
+/**
+ * Stable idempotency key for a single publish attempt (#1125).
+ *
+ * The key is generated once and persisted in the draft, so that if the atomic
+ * job-creation request fails and the user clicks "Publish Job" again, the retry
+ * carries the SAME key. The backend then returns the original job instead of
+ * creating a duplicate. It is only cleared once creation is confirmed complete.
+ */
+function getOrCreateIdempotencyKey(): string {
+  try {
+    const existing = localStorage.getItem(IDEMPOTENCY_KEY_STORAGE);
+    if (existing) return existing;
+  } catch {
+    /* localStorage unavailable — fall through to a fresh key */
+  }
+  const key =
+    typeof crypto !== "undefined" && "randomUUID" in crypto
+      ? crypto.randomUUID()
+      : `job_${Date.now()}_${Math.random().toString(36).slice(2)}`;
+  try {
+    localStorage.setItem(IDEMPOTENCY_KEY_STORAGE, key);
+  } catch {
+    /* ignore persistence failure; the in-memory key is still used this attempt */
+  }
+  return key;
+}
+
+const IDEMPOTENCY_KEY_STORAGE = "job-wizard-idempotency-key";
+
 export default function JobWizard() {
   const { user, isLoading } = useAuth();
   const router = useRouter();
@@ -82,6 +111,9 @@ export default function JobWizard() {
     useState<(typeof PAYMENT_TOKENS)[number]>("XLM");
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState("");
+  // Set once the job is confirmed created, so the draft auto-save effect below
+  // stops re-persisting a draft we've just cleared on success (#1125).
+  const [published, setPublished] = useState(false);
 
   // Today's date in YYYY-MM-DD format for date input min attribute
   const todayStr = new Date().toISOString().split("T")[0];
@@ -156,14 +188,16 @@ export default function JobWizard() {
     [milestones],
   );
 
-  // Save draft to localStorage
+  // Save draft to localStorage. Skipped once the job is published so we don't
+  // re-create a draft we intentionally cleared on success (#1125).
   useEffect(() => {
+    if (published) return;
     const formData = getValues();
     localStorage.setItem(
       STORAGE_KEY,
       JSON.stringify({ formData, skills, paymentToken }),
     );
-  }, [watch(), skills, paymentToken, getValues]);
+  }, [watch(), skills, paymentToken, getValues, published]);
 
   // Validate milestones total matches intended budget in real-time
   useEffect(() => {
@@ -206,46 +240,64 @@ export default function JobWizard() {
     setSubmitting(true);
     setError("");
 
-    try {
-      const token = localStorage.getItem("token");
+    // One stable key for this publish attempt. Reused verbatim on retry so a
+    // partial failure never produces a duplicate job (#1125).
+    const idempotencyKey = getOrCreateIdempotencyKey();
 
+    try {
+      // Must match AuthContext's TOKEN_KEY ("stellarmarket_jwt"); the legacy
+      // "token" key is never set, so it would send `Bearer null` and 401 for
+      // every real logged-in user (issue #1125 review).
+      const token = localStorage.getItem("stellarmarket_jwt");
+
+      // Single atomic call: the backend creates the job and every milestone in
+      // one transaction (all-or-nothing), so there is no window in which a job
+      // exists with a partial milestone set. The budget is derived server-side
+      // from the milestone amounts, so it can't diverge from what's persisted.
       const res = await axios.post(
-        `${API_URL}/jobs`,
+        `${API_URL}/jobs/with-milestones`,
         {
           title: values.title,
           description: values.description,
           category: values.category,
           deadline: new Date(values.deadline).toISOString(),
           skills,
-          budget: totalBudget,
           paymentToken,
+          idempotencyKey,
+          milestones: values.milestones.map((m) => ({
+            title: m.title,
+            description: m.description,
+            amount: Number.parseFloat(m.amount),
+            dueDate: new Date(m.deadline).toISOString(),
+          })),
         },
         { headers: { Authorization: `Bearer ${token}` } },
       );
 
-      for (const m of values.milestones) {
-        await axios.post(
-          `${API_URL}/milestones`,
-          {
-            jobId: res.data.id,
-            title: m.title,
-            description: m.description,
-            amount: Number.parseFloat(m.amount),
-            dueDate: m.deadline,
-          },
-          { headers: { Authorization: `Bearer ${token}` } },
-        );
-      }
-
+      // Only now — with the full job+milestones confirmed persisted — clear the
+      // draft and the idempotency key. On a failure both are intentionally kept
+      // so the user can retry the same attempt without re-entering anything and
+      // without risking a duplicate. `setPublished` first so the auto-save
+      // effect can't immediately rewrite the draft we're about to remove.
+      setPublished(true);
       localStorage.removeItem(STORAGE_KEY);
+      try {
+        localStorage.removeItem(IDEMPOTENCY_KEY_STORAGE);
+      } catch {
+        /* ignore */
+      }
       router.push(`/jobs/${res.data.id}`);
     } catch (err: unknown) {
       if (axios.isAxiosError(err)) {
         setError(
-          err.response?.data?.error || "Failed to post job. Please try again.",
+          err.response?.data?.error ||
+            err.response?.data?.message ||
+            "Failed to post job. Your draft is saved — please try again.",
         );
       } else {
-        setError("An unexpected error occurred.");
+        setError(
+          "An unexpected error occurred. Your draft is saved — please try again.",
+        );
       }
     } finally {
       setSubmitting(false);

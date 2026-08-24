@@ -25,6 +25,61 @@ export const createJobSchema = z.object({
   category: z.string().min(2, "Category is required"),
 });
 
+/**
+ * A single milestone supplied inline when creating a job atomically (#1125).
+ * Mirrors `createMilestoneSchema` but without `jobId` (the job is created in the
+ * same request). Per-milestone amount only needs to be positive here; the job
+ * budget is derived from the sum of these amounts server-side.
+ */
+export const inlineMilestoneSchema = z.object({
+  title: z
+    .string()
+    .min(5, "Title must be at least 5 characters long")
+    .max(200, "Title must be less than 200 characters"),
+  description: z
+    .string()
+    .min(10, "Description must be at least 10 characters long")
+    .max(2000, "Description must be less than 2000 characters"),
+  amount: z.number().positive("Amount must be a positive number"),
+  dueDate: z.string().datetime("Invalid due date format"),
+});
+
+/**
+ * Atomic job+milestones creation (#1125). The job and all of its milestones are
+ * created in one transaction, so a partial failure can never leave a job with an
+ * inconsistent milestone set. `budget` is intentionally NOT accepted from the
+ * client — it is computed from the sum of milestone amounts, which removes any
+ * chance of the client's displayed total diverging from what is persisted.
+ * `idempotencyKey` ties a retry to the original attempt so re-submitting after a
+ * failure returns the original job instead of creating a duplicate.
+ */
+export const createJobWithMilestonesSchema = z.object({
+  title: z
+    .string()
+    .min(5, "Title must be at least 5 characters long")
+    .max(200, "Title must be less than 200 characters"),
+  description: z
+    .string()
+    .min(20, "Description must be at least 20 characters long")
+    .max(5000, "Description must be less than 5000 characters"),
+  skills: z
+    .array(z.string())
+    .min(1, "At least one skill is required")
+    .max(10, "Cannot have more than 10 skills"),
+  deadline: z.string().datetime("Invalid deadline format"),
+  category: z.string().min(2, "Category is required"),
+  paymentToken: z.string().min(1).max(64).optional(),
+  idempotencyKey: z
+    .string()
+    .min(8, "Idempotency key must be at least 8 characters")
+    .max(200, "Idempotency key must be less than 200 characters")
+    .optional(),
+  milestones: z
+    .array(inlineMilestoneSchema)
+    .min(1, "At least one milestone is required")
+    .max(20, "Cannot have more than 20 milestones"),
+});
+
 export const updateJobSchema = z.object({
   title: z
     .string()
