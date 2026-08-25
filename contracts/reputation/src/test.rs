@@ -3479,6 +3479,8 @@ fn test_claim_stake_partial_withdrawal() {
     
     // Mint tokens and submit a review to stake them
     mint(&env, &token_addr, &token_admin, &reviewer, 100_000_000);
+    // Start at t=1000 so advancing by STAKE_LOCKUP_SECONDS gives a clean timestamp.
+    env.ledger().with_mut(|l| l.timestamp = 1000);
     setup_completed_job(&env, &escrow_id, 1u64, &reviewer, &reviewee, &token_addr);
 
     reputation_client.submit_review(
@@ -3490,6 +3492,9 @@ fn test_claim_stake_partial_withdrawal() {
         &String::from_str(&env, "Good work"),
         &MIN_STAKE,
     );
+
+    // Advance past the 7-day lockup window before claiming.
+    env.ledger().with_mut(|l| l.timestamp = 1000 + STAKE_LOCKUP_SECONDS + 1);
 
     // Partial claim: withdraw half of the staked amount
     let claim_amount = MIN_STAKE / 2;
@@ -3515,6 +3520,7 @@ fn test_claim_stake_full_withdrawal() {
     let token_addr = create_token(&env, &token_admin);
     
     mint(&env, &token_addr, &token_admin, &reviewer, 100_000_000);
+    env.ledger().with_mut(|l| l.timestamp = 1000);
     setup_completed_job(&env, &escrow_id, 1u64, &reviewer, &reviewee, &token_addr);
 
     reputation_client.submit_review(
@@ -3526,6 +3532,9 @@ fn test_claim_stake_full_withdrawal() {
         &String::from_str(&env, "Good work"),
         &MIN_STAKE,
     );
+
+    // Advance past the 7-day lockup before claiming.
+    env.ledger().with_mut(|l| l.timestamp = 1000 + STAKE_LOCKUP_SECONDS + 1);
 
     // Full claim: withdraw entire staked amount
     reputation_client.claim_stake(&reviewer, &MIN_STAKE);
@@ -3551,6 +3560,7 @@ fn test_claim_stake_exceeds_balance() {
     let token_addr = create_token(&env, &token_admin);
     
     mint(&env, &token_addr, &token_admin, &reviewer, 100_000_000);
+    env.ledger().with_mut(|l| l.timestamp = 1000);
     setup_completed_job(&env, &escrow_id, 1u64, &reviewer, &reviewee, &token_addr);
 
     reputation_client.submit_review(
@@ -3562,6 +3572,9 @@ fn test_claim_stake_exceeds_balance() {
         &String::from_str(&env, "Good work"),
         &MIN_STAKE,
     );
+
+    // Advance past lockup so the balance-exceeded check is reached, not the lockup check.
+    env.ledger().with_mut(|l| l.timestamp = 1000 + STAKE_LOCKUP_SECONDS + 1);
 
     // Attempt to claim more than the available balance
     // Should fail with BelowMinStake (#11)
@@ -3584,6 +3597,7 @@ fn test_claim_stake_zero_amount() {
     let token_addr = create_token(&env, &token_admin);
     
     mint(&env, &token_addr, &token_admin, &reviewer, 100_000_000);
+    env.ledger().with_mut(|l| l.timestamp = 1000);
     setup_completed_job(&env, &escrow_id, 1u64, &reviewer, &reviewee, &token_addr);
 
     reputation_client.submit_review(
@@ -3595,6 +3609,9 @@ fn test_claim_stake_zero_amount() {
         &String::from_str(&env, "Good work"),
         &MIN_STAKE,
     );
+
+    // Advance past lockup so only the zero-amount check fires.
+    env.ledger().with_mut(|l| l.timestamp = 1000 + STAKE_LOCKUP_SECONDS + 1);
 
     // Attempt to claim zero amount
     // Should fail with BelowMinStake (#11)
@@ -3617,6 +3634,7 @@ fn test_claim_stake_negative_amount() {
     let token_addr = create_token(&env, &token_admin);
     
     mint(&env, &token_addr, &token_admin, &reviewer, 100_000_000);
+    env.ledger().with_mut(|l| l.timestamp = 1000);
     setup_completed_job(&env, &escrow_id, 1u64, &reviewer, &reviewee, &token_addr);
 
     reputation_client.submit_review(
@@ -3628,6 +3646,9 @@ fn test_claim_stake_negative_amount() {
         &String::from_str(&env, "Good work"),
         &MIN_STAKE,
     );
+
+    // Advance past lockup so only the negative-amount check fires.
+    env.ledger().with_mut(|l| l.timestamp = 1000 + STAKE_LOCKUP_SECONDS + 1);
 
     // Attempt to claim negative amount
     // Should fail with BelowMinStake (#11)
@@ -4044,4 +4065,397 @@ fn test_reviewee_rate_limit_resets_after_window() {
     );
 
     assert_eq!(reputation_client.get_review_count(&reviewee), 1);
+}
+
+// ================================================================================================
+// Security fix: stake lockup enforcement, stake_weight cap, and governance weight dampening
+// ================================================================================================
+
+/// Reproduce the flash-loan / same-block claim attack:
+/// 1. Reviewer submits a review (stake deposited, lockup timer starts).
+/// 2. Reviewer immediately tries to reclaim the stake.
+/// 3. Must be rejected with StakeLockupActive (#29) — lockup not elapsed.
+#[test]
+#[should_panic(expected = "Error(Contract, #29)")]
+fn test_claim_stake_rejected_before_lockup_elapses() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let escrow_id = env.register_contract(None, EscrowContract);
+    let reputation_id = env.register_contract(None, ReputationContract);
+    let reputation_client = ReputationContractClient::new(&env, &reputation_id);
+
+    let reviewer = Address::generate(&env);
+    let reviewee = Address::generate(&env);
+    let token_admin = Address::generate(&env);
+    let token_addr = create_token(&env, &token_admin);
+
+    mint(&env, &token_addr, &token_admin, &reviewer, 100_000_000);
+    env.ledger().with_mut(|l| l.timestamp = 1_000_000);
+    setup_completed_job(&env, &escrow_id, 1u64, &reviewer, &reviewee, &token_addr);
+
+    reputation_client.submit_review(
+        &escrow_id,
+        &reviewer,
+        &reviewee,
+        &1u64,
+        &5u32,
+        &String::from_str(&env, "Great"),
+        &MIN_STAKE,
+    );
+
+    // Advance only 1 second — far below the 7-day lockup.
+    env.ledger().with_mut(|l| l.timestamp = 1_000_001);
+
+    // Must fail with StakeLockupActive (#29).
+    reputation_client.claim_stake(&reviewer, &MIN_STAKE);
+}
+
+/// Lockup boundary: claim rejected at exactly lockup_end - 1 second, accepted
+/// at lockup_end (staked_at + STAKE_LOCKUP_SECONDS).
+#[test]
+fn test_claim_stake_accepted_exactly_at_lockup_boundary() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let escrow_id = env.register_contract(None, EscrowContract);
+    let reputation_id = env.register_contract(None, ReputationContract);
+    let reputation_client = ReputationContractClient::new(&env, &reputation_id);
+
+    let reviewer = Address::generate(&env);
+    let reviewee = Address::generate(&env);
+    let token_admin = Address::generate(&env);
+    let token_addr = create_token(&env, &token_admin);
+
+    mint(&env, &token_addr, &token_admin, &reviewer, 100_000_000);
+
+    let stake_ts: u64 = 1_000_000;
+    env.ledger().with_mut(|l| l.timestamp = stake_ts);
+    setup_completed_job(&env, &escrow_id, 1u64, &reviewer, &reviewee, &token_addr);
+
+    reputation_client.submit_review(
+        &escrow_id,
+        &reviewer,
+        &reviewee,
+        &1u64,
+        &5u32,
+        &String::from_str(&env, "Good"),
+        &MIN_STAKE,
+    );
+
+    // One second before lockup ends — must still be rejected.
+    env.ledger()
+        .with_mut(|l| l.timestamp = stake_ts + STAKE_LOCKUP_SECONDS - 1);
+    let result = reputation_client.try_claim_stake(&reviewer, &MIN_STAKE);
+    assert!(
+        result.is_err(),
+        "claim must be rejected 1 second before lockup elapses"
+    );
+
+    // Exactly at lockup_end — must succeed.
+    env.ledger()
+        .with_mut(|l| l.timestamp = stake_ts + STAKE_LOCKUP_SECONDS);
+    reputation_client.claim_stake(&reviewer, &MIN_STAKE);
+
+    assert_eq!(reputation_client.get_stake_balance(&reviewer), 0);
+}
+
+/// Incremental stake refresh: a second review resets the lockup anchor.
+/// The original stake cannot be claimed just because the first lockup elapsed —
+/// the second deposit restarts the window for ALL accumulated stake.
+#[test]
+#[should_panic(expected = "Error(Contract, #29)")]
+fn test_second_review_resets_lockup_for_all_stake() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let escrow_id = env.register_contract(None, EscrowContract);
+    let reputation_id = env.register_contract(None, ReputationContract);
+    let reputation_client = ReputationContractClient::new(&env, &reputation_id);
+
+    let reviewer = Address::generate(&env);
+    let reviewee1 = Address::generate(&env);
+    let reviewee2 = Address::generate(&env);
+    let token_admin = Address::generate(&env);
+    let token_addr = create_token(&env, &token_admin);
+
+    mint(&env, &token_addr, &token_admin, &reviewer, 1_000_000_000);
+
+    // First review at t=1000.
+    env.ledger().with_mut(|l| l.timestamp = 1000);
+    setup_completed_job(&env, &escrow_id, 1u64, &reviewer, &reviewee1, &token_addr);
+    reputation_client.submit_review(
+        &escrow_id,
+        &reviewer,
+        &reviewee1,
+        &1u64,
+        &5u32,
+        &String::from_str(&env, "Great"),
+        &MIN_STAKE,
+    );
+
+    // Advance past the first lockup window (8 days).
+    env.ledger().with_mut(|l| l.timestamp = 1000 + STAKE_LOCKUP_SECONDS + 1);
+
+    // Second review — resets lockup anchor to current time.
+    setup_completed_job(&env, &escrow_id, 2u64, &reviewer, &reviewee2, &token_addr);
+    reputation_client.submit_review(
+        &escrow_id,
+        &reviewer,
+        &reviewee2,
+        &2u64,
+        &5u32,
+        &String::from_str(&env, "Also great"),
+        &MIN_STAKE,
+    );
+
+    // Attempting to claim immediately after the second review must fail even
+    // though the first lockup window has fully elapsed.
+    env.ledger().with_mut(|l| l.timestamp = 1000 + STAKE_LOCKUP_SECONDS + 2);
+    reputation_client.claim_stake(&reviewer, &MIN_STAKE);
+}
+
+/// Stake-weight cap: a single review with a stake_weight far above
+/// MAX_STAKE_WEIGHT_PER_REVIEW must contribute no more than
+/// 5 * MAX_STAKE_WEIGHT_PER_REVIEW to total_score (at a 5-star rating).
+/// Before the fix, passing stake_weight = 1_000_000 * MIN_STAKE would have
+/// given governance weight proportional to that huge number.
+#[test]
+fn test_stake_weight_capped_per_review() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let escrow_id = env.register_contract(None, EscrowContract);
+    let reputation_id = env.register_contract(None, ReputationContract);
+    let reputation_client = ReputationContractClient::new(&env, &reputation_id);
+
+    let reviewer = Address::generate(&env);
+    let reviewee = Address::generate(&env);
+    let token_admin = Address::generate(&env);
+    let token_addr = create_token(&env, &token_admin);
+
+    // Mint a very large amount so the transfer itself succeeds.
+    // 100 * MAX_STAKE_WEIGHT_PER_REVIEW in raw token units.
+    let huge_stake: i128 = (MAX_STAKE_WEIGHT_PER_REVIEW as i128) * 100;
+    mint(&env, &token_addr, &token_admin, &reviewer, huge_stake);
+
+    env.ledger().with_mut(|l| l.timestamp = 1000);
+    setup_completed_job(&env, &escrow_id, 1u64, &reviewer, &reviewee, &token_addr);
+
+    reputation_client.submit_review(
+        &escrow_id,
+        &reviewer,
+        &reviewee,
+        &1u64,
+        &5u32,
+        &String::from_str(&env, "Five stars"),
+        &huge_stake,
+    );
+
+    let (score, _) = reputation_client.get_gov_weight(&reviewee);
+
+    // With no cap the score would be 5 * 100 * MAX_STAKE_WEIGHT_PER_REVIEW.
+    // With the per-review cap it must be exactly 5 * MAX_STAKE_WEIGHT_PER_REVIEW.
+    let expected_capped = 5u64 * MAX_STAKE_WEIGHT_PER_REVIEW;
+    assert_eq!(
+        score, expected_capped,
+        "governance score must be capped at 5 * MAX_STAKE_WEIGHT_PER_REVIEW, got {score}"
+    );
+}
+
+/// Governance weight hard cap: even if 200 max-rated, max-staked reviews exist,
+/// the score returned by get_gov_weight must not exceed MAX_GOV_WEIGHT.
+#[test]
+fn test_get_gov_weight_capped_at_max() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.budget().reset_unlimited();
+
+    let reputation_id = env.register_contract(None, ReputationContract);
+    let client = ReputationContractClient::new(&env, &reputation_id);
+    let admin = Address::generate(&env);
+    client.initialize(&vec![&env, admin.clone()], &1u32, &0u32);
+
+    let user = Address::generate(&env);
+    let reviewer = Address::generate(&env);
+
+    // Inject 200 reviews each with MAX_STAKE_WEIGHT_PER_REVIEW and 5-star rating,
+    // which is exactly the legitimate ceiling. Also inject 1 extra review with a
+    // stake 10x the cap; capping must keep the total at MAX_GOV_WEIGHT.
+    env.as_contract(&reputation_id, || {
+        let mut reviews: Vec<Review> = Vec::new(&env);
+        for i in 0..200u64 {
+            reviews.push_back(Review {
+                reviewer: reviewer.clone(),
+                reviewee: user.clone(),
+                job_id: i,
+                rating: 5u32,
+                comment: String::from_str(&env, ""),
+                // 10x the per-review cap — read-path capping must bring this down.
+                stake_weight: (MAX_STAKE_WEIGHT_PER_REVIEW as i128) * 10,
+                timestamp: 0,
+            });
+        }
+        env.storage()
+            .persistent()
+            .set(&DataKey::Reviews(user.clone()), &reviews);
+        env.storage().persistent().set(
+            &DataKey::Reputation(user.clone()),
+            &UserReputation {
+                user: user.clone(),
+                total_score: 0,
+                total_weight: 0,
+                review_count: 200,
+                last_updated_ts: 0,
+            },
+        );
+    });
+
+    let (score, _ts) = client.get_gov_weight(&user);
+    assert_eq!(
+        score, MAX_GOV_WEIGHT,
+        "get_gov_weight must be capped at MAX_GOV_WEIGHT, got {score}"
+    );
+}
+
+/// Two-address Sybil exploit end-to-end:
+/// Attacker controls addr_a and addr_b, creates a completed job between them,
+/// each reviews the other with a massive stake_weight.
+/// Assert that get_gov_weight is capped rather than reflecting the raw
+/// inflated stake, AND that the stake cannot be reclaimed before the lockup.
+#[test]
+fn test_sybil_two_address_self_dealt_review_capped() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let escrow_id = env.register_contract(None, EscrowContract);
+    let reputation_id = env.register_contract(None, ReputationContract);
+    let reputation_client = ReputationContractClient::new(&env, &reputation_id);
+
+    // Attacker-controlled addresses.
+    let addr_a = Address::generate(&env);
+    let addr_b = Address::generate(&env);
+    let token_admin = Address::generate(&env);
+    let token_addr = create_token(&env, &token_admin);
+
+    // Mint enough for both to stake a huge amount.
+    let huge_stake: i128 = (MAX_STAKE_WEIGHT_PER_REVIEW as i128) * 1_000;
+    mint(&env, &token_addr, &token_admin, &addr_a, huge_stake);
+    mint(&env, &token_addr, &token_admin, &addr_b, huge_stake);
+
+    env.ledger().with_mut(|l| l.timestamp = 1_000_000);
+
+    // Create a completed job between the two attacker addresses.
+    setup_completed_job(&env, &escrow_id, 1u64, &addr_a, &addr_b, &token_addr);
+
+    // addr_a (client) reviews addr_b (freelancer) with inflated stake.
+    reputation_client.submit_review(
+        &escrow_id,
+        &addr_a,
+        &addr_b,
+        &1u64,
+        &5u32,
+        &String::from_str(&env, "Sybil 5 stars"),
+        &huge_stake,
+    );
+
+    // addr_b (freelancer) reviews addr_a (client) with inflated stake.
+    setup_completed_job(&env, &escrow_id, 2u64, &addr_b, &addr_a, &token_addr);
+    reputation_client.submit_review(
+        &escrow_id,
+        &addr_b,
+        &addr_a,
+        &2u64,
+        &5u32,
+        &String::from_str(&env, "Sybil 5 stars back"),
+        &huge_stake,
+    );
+
+    // --- Assertion 1: governance weight is capped, NOT inflated ---
+    let (score_b, _) = reputation_client.get_gov_weight(&addr_b);
+    let (score_a, _) = reputation_client.get_gov_weight(&addr_a);
+    let expected_max_single = 5u64 * MAX_STAKE_WEIGHT_PER_REVIEW;
+    assert_eq!(
+        score_b, expected_max_single,
+        "addr_b gov weight must be capped at {expected_max_single}, got {score_b}"
+    );
+    assert_eq!(
+        score_a, expected_max_single,
+        "addr_a gov weight must be capped at {expected_max_single}, got {score_a}"
+    );
+
+    // --- Assertion 2: stake cannot be reclaimed immediately (flash-loan defence) ---
+    let result_a = reputation_client.try_claim_stake(&addr_a, &huge_stake);
+    assert!(
+        result_a.is_err(),
+        "addr_a must not be able to reclaim stake before lockup elapses"
+    );
+    let result_b = reputation_client.try_claim_stake(&addr_b, &huge_stake);
+    assert!(
+        result_b.is_err(),
+        "addr_b must not be able to reclaim stake before lockup elapses"
+    );
+
+    // --- Assertion 3: stake CAN be reclaimed after the lockup ---
+    env.ledger()
+        .with_mut(|l| l.timestamp = 1_000_000 + STAKE_LOCKUP_SECONDS + 1);
+    reputation_client.claim_stake(&addr_a, &huge_stake);
+    reputation_client.claim_stake(&addr_b, &huge_stake);
+    assert_eq!(reputation_client.get_stake_balance(&addr_a), 0);
+    assert_eq!(reputation_client.get_stake_balance(&addr_b), 0);
+}
+
+/// Legitimate high-stake reviewer: a normal MIN_STAKE review with a 5-star
+/// rating goes through uncapped (stake is below MAX_STAKE_WEIGHT_PER_REVIEW)
+/// and remains claimable after the lockup. Ensures the fix doesn't break
+/// the honest happy path.
+#[test]
+fn test_legitimate_review_and_claim_unaffected() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let escrow_id = env.register_contract(None, EscrowContract);
+    let reputation_id = env.register_contract(None, ReputationContract);
+    let reputation_client = ReputationContractClient::new(&env, &reputation_id);
+
+    let reviewer = Address::generate(&env);
+    let reviewee = Address::generate(&env);
+    let token_admin = Address::generate(&env);
+    let token_addr = create_token(&env, &token_admin);
+
+    mint(&env, &token_addr, &token_admin, &reviewer, 100_000_000);
+    env.ledger().with_mut(|l| l.timestamp = 5_000_000);
+    setup_completed_job(&env, &escrow_id, 1u64, &reviewer, &reviewee, &token_addr);
+
+    reputation_client.submit_review(
+        &escrow_id,
+        &reviewer,
+        &reviewee,
+        &1u64,
+        &5u32,
+        &String::from_str(&env, "Excellent"),
+        &MIN_STAKE,
+    );
+
+    // Reputation score = 5 * MIN_STAKE (well below both caps).
+    let (score, _) = reputation_client.get_gov_weight(&reviewee);
+    assert_eq!(
+        score,
+        5u64 * MIN_STAKE as u64,
+        "legitimate review score should equal 5 * MIN_STAKE"
+    );
+
+    // Claiming before lockup elapses is still rejected.
+    assert!(
+        reputation_client
+            .try_claim_stake(&reviewer, &MIN_STAKE)
+            .is_err(),
+        "claim must fail inside the lockup window"
+    );
+
+    // After lockup, claim succeeds.
+    env.ledger()
+        .with_mut(|l| l.timestamp = 5_000_000 + STAKE_LOCKUP_SECONDS + 1);
+    reputation_client.claim_stake(&reviewer, &MIN_STAKE);
+    assert_eq!(reputation_client.get_stake_balance(&reviewer), 0);
 }
