@@ -62,6 +62,21 @@ use crate::{AdminAction, EscrowContract, MAX_FEE_BPS};
 #[allow(unused_imports)]
 use crate::EscrowContractClient;
 
+/// Defense-in-depth cap on the raw score returned by the reputation contract's
+/// `get_gov_weight`. The reputation contract already caps its output at
+/// `MAX_GOV_WEIGHT` (= 5 * MAX_STAKE_WEIGHT_PER_REVIEW * 200), but this local
+/// cap is an independent second barrier inside the escrow governance layer.
+///
+/// If the reputation contract is upgraded to a version that removes its own cap,
+/// or if a future cross-contract interface mismatch causes uncapped weight to
+/// arrive here, this guard ensures a single account can never cast more than
+/// `GOV_WEIGHT_CAP` voting units regardless of what the reputation side reports.
+///
+/// Value is kept identical to the reputation contract's `MAX_GOV_WEIGHT` so that
+/// legitimate high-reputation users are unaffected.
+/// 5 stars × 10_000_000_000 (max weight per review) × 200 (max reviews counted)
+const GOV_WEIGHT_CAP: u64 = 10_000_000_000_000_u64;
+
 // ============================================================
 // Errors
 // ============================================================
@@ -322,7 +337,12 @@ fn snapshot_weight(
     if score == 0 {
         return Err(GovError::NoVotingPower);
     }
-    Ok(score as u128)
+    // Defense-in-depth: cap the raw score at GOV_WEIGHT_CAP before it becomes
+    // voting weight. The reputation contract applies the same cap via
+    // MAX_GOV_WEIGHT, but this is an independent escrow-side guard against a
+    // future reputation upgrade that removes or raises that cap (issue #exploit).
+    let capped_score = score.min(GOV_WEIGHT_CAP);
+    Ok(capped_score as u128)
 }
 
 /// Add `weight` to the appropriate tally on `proposal` for `support`.

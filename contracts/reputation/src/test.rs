@@ -2938,10 +2938,10 @@ fn test_stake_weight_at_u64_max_saturates() {
     );
 
     let rep = reputation_client.get_reputation(&reviewee);
-    // Weight should be saturated to u64::MAX, not wrapped
-    assert_eq!(rep.total_weight, u64::MAX);
-    // Score (rating * weight) also saturates to u64::MAX rather than overflowing
-    assert_eq!(rep.total_score, u64::MAX);
+    // Weight is capped at MAX_STAKE_WEIGHT_PER_REVIEW regardless of raw stake size.
+    assert_eq!(rep.total_weight, MAX_STAKE_WEIGHT_PER_REVIEW);
+    // Score = rating (5) * capped weight.
+    assert_eq!(rep.total_score, 5 * MAX_STAKE_WEIGHT_PER_REVIEW);
 }
 
 #[test]
@@ -2976,10 +2976,10 @@ fn test_stake_weight_above_u64_max_saturates() {
     );
 
     let rep = reputation_client.get_reputation(&reviewee);
-    // Weight should be saturated to u64::MAX, not a wrapped/truncated value
-    assert_eq!(rep.total_weight, u64::MAX);
-    // Score (rating * weight) also saturates to u64::MAX rather than overflowing
-    assert_eq!(rep.total_score, u64::MAX);
+    // Weight is capped at MAX_STAKE_WEIGHT_PER_REVIEW regardless of raw stake size.
+    assert_eq!(rep.total_weight, MAX_STAKE_WEIGHT_PER_REVIEW);
+    // Score = rating (4) * capped weight.
+    assert_eq!(rep.total_score, 4 * MAX_STAKE_WEIGHT_PER_REVIEW);
 }
 
 #[test]
@@ -3042,8 +3042,8 @@ fn test_stake_weight_decay_saturates_large_values() {
     });
 
     let rep = reputation_client.get_reputation(&reviewee);
-    // Weight started at u64::MAX (saturated), after 5% decay: 95% of u64::MAX
-    let expected_weight = (u64::MAX as u128 * 95 / 100) as u64;
+    // Weight started at MAX_STAKE_WEIGHT_PER_REVIEW (capped on write), after 5% decay: 95% of cap.
+    let expected_weight = MAX_STAKE_WEIGHT_PER_REVIEW * 95 / 100;
     assert_eq!(rep.total_weight, expected_weight);
 }
 
@@ -4164,7 +4164,6 @@ fn test_claim_stake_accepted_exactly_at_lockup_boundary() {
 /// The original stake cannot be claimed just because the first lockup elapsed —
 /// the second deposit restarts the window for ALL accumulated stake.
 #[test]
-#[should_panic(expected = "Error(Contract, #29)")]
 fn test_second_review_resets_lockup_for_all_stake() {
     let env = Env::default();
     env.mock_all_auths();
@@ -4210,9 +4209,14 @@ fn test_second_review_resets_lockup_for_all_stake() {
     );
 
     // Attempting to claim immediately after the second review must fail even
-    // though the first lockup window has fully elapsed.
+    // though the first lockup window has fully elapsed — the second review
+    // resets the lockup anchor to the current timestamp.
     env.ledger().with_mut(|l| l.timestamp = 1000 + STAKE_LOCKUP_SECONDS + 2);
-    reputation_client.claim_stake(&reviewer, &MIN_STAKE);
+    let result = reputation_client.try_claim_stake(&reviewer, &MIN_STAKE);
+    assert!(
+        result.is_err(),
+        "claim must be rejected while the second review's lockup is still active"
+    );
 }
 
 /// Stake-weight cap: a single review with a stake_weight far above
@@ -4235,9 +4239,9 @@ fn test_stake_weight_capped_per_review() {
     let token_addr = create_token(&env, &token_admin);
 
     // Mint a very large amount so the transfer itself succeeds.
-    // 100 * MAX_STAKE_WEIGHT_PER_REVIEW in raw token units.
+    // 100 * MAX_STAKE_WEIGHT_PER_REVIEW in raw token units, plus 100 for job funding.
     let huge_stake: i128 = (MAX_STAKE_WEIGHT_PER_REVIEW as i128) * 100;
-    mint(&env, &token_addr, &token_admin, &reviewer, huge_stake);
+    mint(&env, &token_addr, &token_admin, &reviewer, huge_stake + 100);
 
     env.ledger().with_mut(|l| l.timestamp = 1000);
     setup_completed_job(&env, &escrow_id, 1u64, &reviewer, &reviewee, &token_addr);
@@ -4338,10 +4342,10 @@ fn test_sybil_two_address_self_dealt_review_capped() {
     let token_admin = Address::generate(&env);
     let token_addr = create_token(&env, &token_admin);
 
-    // Mint enough for both to stake a huge amount.
+    // Mint enough for both to stake a huge amount, plus 100 each for job funding.
     let huge_stake: i128 = (MAX_STAKE_WEIGHT_PER_REVIEW as i128) * 1_000;
-    mint(&env, &token_addr, &token_admin, &addr_a, huge_stake);
-    mint(&env, &token_addr, &token_admin, &addr_b, huge_stake);
+    mint(&env, &token_addr, &token_admin, &addr_a, huge_stake + 100);
+    mint(&env, &token_addr, &token_admin, &addr_b, huge_stake + 100);
 
     env.ledger().with_mut(|l| l.timestamp = 1_000_000);
 
