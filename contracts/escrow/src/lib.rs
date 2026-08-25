@@ -3433,6 +3433,26 @@ impl EscrowContract {
         require_state_not_terminal(&job)?;
         require_state_not_disputed(&job)?;
 
+        // Reject proposals that would orphan an active sub-assignment.
+        // A sub-assignment is keyed by milestone id; if the proposal drops or renumbers
+        // a milestone that carries an active sub-assignment, the sub-freelancer would have
+        // no remaining payout path after acceptance.
+        for old_ms in job.milestones.iter() {
+            let sub_key = DataKey::SubAssignment(job_id, old_ms.id);
+            if let Some(sub) = env
+                .storage()
+                .persistent()
+                .get::<DataKey, SubAssignment>(&sub_key)
+            {
+                if sub.status == SubAssignmentStatus::Active {
+                    let retained = new_milestones.iter().any(|m| m.id == old_ms.id);
+                    if !retained {
+                        return Err(EscrowError::InvalidStatus);
+                    }
+                }
+            }
+        }
+
         // 3. Assert no existing Pending proposal, allowing overwrite of expired ones
         if let Some(existing) = env
             .storage()
@@ -3623,6 +3643,42 @@ impl EscrowContract {
                 .any(|m| m.id == old_milestone.id && m.amount >= disbursed);
             if !still_covered {
                 return Err(EscrowError::RevisionBelowDisbursedAmount);
+            }
+        }
+
+        // Sub-assignment reconciliation: for every old milestone that carries an active
+        // sub-assignment, (a) block proposals that drop the milestone id entirely — the
+        // sub-freelancer would have no remaining payout path — and (b) proportionally
+        // scale the sub-amount when the milestone budget shrinks, so neither party is
+        // left with a disproportionate zero-payout. This is a safety net even when
+        // propose_revision already caught the orphan case, because a sub-assignment
+        // could be created in the window between propose and accept.
+        for old_ms in job.milestones.iter() {
+            let sub_key = DataKey::SubAssignment(job_id, old_ms.id);
+            let sub_opt: Option<SubAssignment> = env.storage().persistent().get(&sub_key);
+            if let Some(mut sub) = sub_opt {
+                if sub.status != SubAssignmentStatus::Active {
+                    continue;
+                }
+                let new_ms_opt = proposal.new_milestones.iter().find(|m| m.id == old_ms.id);
+                match new_ms_opt {
+                    None => {
+                        return Err(EscrowError::InvalidStatus);
+                    }
+                    Some(new_ms) if new_ms.amount < sub.amount => {
+                        // Scale proportionally: new_sub = sub.amount * new_ms.amount / old_ms.amount.
+                        // old_ms.amount > 0 is guaranteed by milestone validation at creation/propose time.
+                        let new_sub_amount = (sub.amount * new_ms.amount) / old_ms.amount;
+                        sub.amount = new_sub_amount;
+                        env.storage().persistent().set(&sub_key, &sub);
+                        env.storage().persistent().extend_ttl(
+                            &sub_key,
+                            TTL_THRESHOLD_LEDGERS,
+                            TTL_EXTEND_TO_LEDGERS,
+                        );
+                    }
+                    _ => {}
+                }
             }
         }
 
