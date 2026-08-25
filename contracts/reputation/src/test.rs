@@ -4193,8 +4193,12 @@ fn test_second_review_resets_lockup_for_all_stake() {
         &MIN_STAKE,
     );
 
-    // Advance past the first lockup window (8 days).
-    env.ledger().with_mut(|l| l.timestamp = 1000 + STAKE_LOCKUP_SECONDS + 1);
+    // Advance past the first lockup window (8 days) and past the rate-limit
+    // window (120 ledgers) so the second review by the same reviewer is allowed.
+    env.ledger().with_mut(|l| {
+        l.timestamp = 1000 + STAKE_LOCKUP_SECONDS + 1;
+        l.sequence_number = 200; // > 0 + 120 (RATE_LIMIT_LEDGERS_DEFAULT)
+    });
 
     // Second review — resets lockup anchor to current time.
     setup_completed_job(&env, &escrow_id, 2u64, &reviewer, &reviewee2, &token_addr);
@@ -4211,7 +4215,9 @@ fn test_second_review_resets_lockup_for_all_stake() {
     // Attempting to claim immediately after the second review must fail even
     // though the first lockup window has fully elapsed — the second review
     // resets the lockup anchor to the current timestamp.
-    env.ledger().with_mut(|l| l.timestamp = 1000 + STAKE_LOCKUP_SECONDS + 2);
+    env.ledger().with_mut(|l| {
+        l.timestamp = 1000 + STAKE_LOCKUP_SECONDS + 2;
+    });
     let result = reputation_client.try_claim_stake(&reviewer, &MIN_STAKE);
     assert!(
         result.is_err(),
