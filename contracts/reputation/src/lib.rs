@@ -120,6 +120,12 @@ pub enum ReputationError {
     /// Rejected when `claim_stake` finds a positive `StakeBalance` but no
     /// recorded `StakeToken` for the reviewer (stake predates token tracking).
     StakeTokenNotFound = 28,
+    /// Rejected when `claim_stake` is called before the lockup period has
+    /// elapsed. Stake must remain locked for `STAKE_LOCKUP_SECONDS` after the
+    /// first review that deposited it, preventing flash-loan-funded governance
+    /// weight inflation where an attacker stakes, inflates reputation/governance
+    /// weight, and immediately reclaims the stake in the same block (issue #exploit).
+    StakeLockupActive = 29,
 }
 
 #[contracttype]
@@ -299,6 +305,11 @@ enum DataKey {
     /// The token address a reviewer's current `StakeBalance` is denominated in,
     /// so it can be transferred back correctly on `claim_stake`.
     StakeToken(Address),
+    /// The ledger timestamp at which the reviewer first staked (i.e. submitted
+    /// their first review). Used by `claim_stake` to enforce `STAKE_LOCKUP_SECONDS`.
+    /// Reset to the current timestamp whenever additional stake is added so that
+    /// all stake (including incremental deposits) must age past the lockup.
+    StakeLockupTs(Address),
     ReviewAppeal(Address, Address, u64),
     DisputeContract,
     Endorsement(Address, String, Address),
@@ -353,12 +364,36 @@ const RATE_LIMIT_LEDGERS_DEFAULT: u32 = 120; // ~10 minutes
 /// Hard floor on the stake_weight used as reputation vote weight.
 /// Prevents zero-weight reviews from gaining weight=1 via the fallback path.
 pub const MIN_STAKE_WEIGHT: u64 = 1;
+
+/// Minimum lockup duration in seconds before staked tokens can be reclaimed.
+/// 7 days (604_800 seconds). This ensures that reputation weight established by
+/// a stake cannot be flash-loaned: the economic cost must be borne for at least
+/// this period, making governance manipulation via rapid stake/unstake
+/// economically meaningful rather than free (issue #exploit).
+pub const STAKE_LOCKUP_SECONDS: u64 = 7 * 24 * 60 * 60; // 604_800
+
+/// Per-review cap on the stake weight credited toward `total_score` and
+/// `total_weight`. Any stake_weight above this threshold is clamped before it
+/// is multiplied by the star rating and added to the reviewee's reputation.
+/// This prevents a single self-dealt review with an arbitrarily large
+/// `stake_weight` from dominating `total_score` and thereby inflating
+/// governance voting power via `get_gov_weight` (issue #exploit).
+///
+/// Set to 1_000 units at 7 decimals = 10_000_000_000 stroops. Reviewers who
+/// want more governance influence must earn it across multiple distinct
+/// counterparties rather than from a single inflated stake.
+pub const MAX_STAKE_WEIGHT_PER_REVIEW: u64 = 1_000 * 10_000_000; // 10_000_000_000
+
+/// Absolute cap on the `score` value returned by `get_gov_weight`. Defense-in-
+/// depth against any future bypass of the per-review cap. Equals five 5-star
+/// max-weight reviews times the maximum counted reviews (200), so a legitimately
+/// excellent user is never capped in practice.
+pub const MAX_GOV_WEIGHT: u64 = 5 * MAX_STAKE_WEIGHT_PER_REVIEW * 200; // 10_000_000_000_000
+
 const DEFAULT_REFERRAL_BONUS: u64 = 5; // Equivalates to a 5-star review bonus
 /// Weight used when crediting referral bonus to reputation (not min review stake).
 const REFERRAL_BONUS_REPUTATION_WEIGHT: u64 = 1;
-const ONE_YEAR_IN_SECONDS: u64 = 31_536_000;
-
-/// Default upper bound for the annual reputation `decay_rate` (percent per year).
+const ONE_YEAR_IN_SECONDS: u64 = 31_536_000;/// Default upper bound for the annual reputation `decay_rate` (percent per year).
 /// 20% keeps decay meaningful without destroying accumulated reputation in a
 /// single period. The super-admin can raise this via `set_max_decay_rate` up to
 /// `MAX_DECAY_RATE_HARD_CEILING` (issue #783).
@@ -681,13 +716,29 @@ impl ReputationContract {
             .persistent()
             .extend_ttl(&stake_token_key, MIN_TTL_THRESHOLD, MIN_TTL_EXTEND_TO);
 
+        // Record (or refresh) the lockup start timestamp. We always write the
+        // current timestamp so that incremental stakes cannot use an old anchor
+        // to escape the lockup early. The full lockup window restarts from the
+        // latest deposit, ensuring all accumulated stake is bound for
+        // STAKE_LOCKUP_SECONDS from the most recent review (issue #exploit).
+        let lockup_key = DataKey::StakeLockupTs(reviewer.clone());
+        let current_ts = env.ledger().timestamp();
+        env.storage().persistent().set(&lockup_key, &current_ts);
+        env.storage()
+            .persistent()
+            .extend_ttl(&lockup_key, MIN_TTL_THRESHOLD, MIN_TTL_EXTEND_TO);
+
         // Saturate stake_weight to u64::MAX instead of truncating to prevent
         // large i128 stakes from wrapping to arbitrary values (issue #982).
-        let weight = if stake_weight > 0 {
+        // Then apply the per-review cap (MAX_STAKE_WEIGHT_PER_REVIEW) so that a
+        // single self-dealt review with an arbitrarily large stake_weight cannot
+        // dominate total_score and mint free governance power (issue #exploit).
+        let raw_weight = if stake_weight > 0 {
             i128::min(stake_weight, u64::MAX as i128) as u64
         } else {
             1u64
         };
+        let weight = raw_weight.min(MAX_STAKE_WEIGHT_PER_REVIEW);
 
         // Capture the old tier before mutating reputation so the tier_up event
         // can carry both the previous and new tier values.
@@ -1211,7 +1262,12 @@ impl ReputationContract {
             None => return (0, 0),
         };
         let (total_score, _total_weight, _review_count) = Self::get_decayed_totals(&env, user);
-        (total_score, last_change_ts)
+        // Cap the returned score at MAX_GOV_WEIGHT so that even if per-review
+        // capping is somehow bypassed in a future code path, a single user's
+        // raw total_score cannot translate into unbounded governance voting power
+        // (issue #exploit, defense-in-depth).
+        let capped_score = total_score.min(MAX_GOV_WEIGHT);
+        (capped_score, last_change_ts)
     }
 
     /// Get reputation together with the registered referrer (if any).
@@ -1820,9 +1876,13 @@ impl ReputationContract {
         for idx in start..review_count {
             if let Some(review) = reviews.get(idx) {
                 let factor = get_decay_factor(decay_rate, current_ts, review.timestamp);
-                // Saturate stake_weight to u64::MAX to prevent truncation (issue #982)
+                // Saturate stake_weight to u64::MAX to prevent truncation (issue #982).
+                // Then cap at MAX_STAKE_WEIGHT_PER_REVIEW so that historical reviews
+                // submitted before the per-review cap was enforced in submit_review
+                // cannot still contribute unbounded weight on the read path (issue #exploit).
                 let clamped_weight = i128::min(review.stake_weight, u64::MAX as i128) as u64;
-                let decayed_weight = scale_by_factor_pct(clamped_weight, factor);
+                let capped_weight = clamped_weight.min(MAX_STAKE_WEIGHT_PER_REVIEW);
+                let decayed_weight = scale_by_factor_pct(capped_weight, factor);
                 total_score = total_score
                     .saturating_add((review.rating as u64).saturating_mul(decayed_weight));
                 total_weight = total_weight.saturating_add(decayed_weight);
@@ -2061,6 +2121,13 @@ impl ReputationContract {
 
     /// Claim staked tokens back after a lockup period. Allows reviewers to withdraw
     /// their stakes. Transfers the claimed amount from the contract back to the reviewer.
+    ///
+    /// Enforces a `STAKE_LOCKUP_SECONDS` wait from the timestamp of the last
+    /// `submit_review` that deposited stake. This prevents flash-loan-funded
+    /// governance weight inflation: an attacker who inflates `total_score` via a
+    /// self-dealt high-stake review must leave the capital locked for 7 days
+    /// before recovering it, making the attack economically meaningful rather
+    /// than free-of-cost (issue #exploit).
     pub fn claim_stake(env: Env, reviewer: Address, amount: i128) -> Result<(), ReputationError> {
         reviewer.require_auth();
         require_not_paused(&env)?;
@@ -2070,6 +2137,22 @@ impl ReputationContract {
 
         if balance < amount || amount <= 0 {
             return Err(ReputationError::BelowMinStake);
+        }
+
+        // Lockup enforcement: reject claims where the stake is younger than
+        // STAKE_LOCKUP_SECONDS. Pre-existing stakes without a recorded timestamp
+        // (StakeLockupTs absent) are treated as if they were staked at time 0,
+        // so they immediately satisfy the lockup and remain claimable — no
+        // backward-compatibility breakage for stakes that predate this check.
+        let lockup_key = DataKey::StakeLockupTs(reviewer.clone());
+        let staked_at: u64 = env
+            .storage()
+            .persistent()
+            .get(&lockup_key)
+            .unwrap_or(0u64);
+        let current_ts = env.ledger().timestamp();
+        if current_ts < staked_at.saturating_add(STAKE_LOCKUP_SECONDS) {
+            return Err(ReputationError::StakeLockupActive);
         }
 
         // Update balance
@@ -2093,6 +2176,9 @@ impl ReputationContract {
 
         if new_balance <= 0 {
             env.storage().persistent().remove(&stake_token_key);
+            // Remove the lockup timestamp too — no stake remaining means the
+            // next deposit will anchor a fresh lockup window.
+            env.storage().persistent().remove(&lockup_key);
         }
 
         env.events().publish(
