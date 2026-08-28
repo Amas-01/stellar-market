@@ -75,7 +75,7 @@ describe("StatsRow component", () => {
     expect(screen.getByText("20 reviews")).toBeInTheDocument();
 
     expect(mockedAxios.get).toHaveBeenCalledWith(
-      expect.stringContaining("/freelancers/me/stats"),
+      "http://localhost:5000/api/v1/freelancers/me/stats",
       expect.objectContaining({
         headers: { Authorization: "Bearer fake-token" },
       })
