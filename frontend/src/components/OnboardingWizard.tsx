@@ -312,8 +312,6 @@ export default function OnboardingWizard() {
 
   useFocusTrap(modalRef, { open, onClose: handleSkip });
 
-  useFocusTrap(modalRef, { open, onClose: handleSkip });
-
   const handleStepOneNext = () => setStep(2);
 
   const handleStepTwoNext = async () => {
