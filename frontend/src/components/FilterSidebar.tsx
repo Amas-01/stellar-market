@@ -117,7 +117,7 @@ export default function FilterSidebar({
     fetchSkills();
   }, []);
 
-  const content = (
+  const renderContent = (idPrefix: string) => (
     <div>
       {/* Header */}
       <div className="flex items-center justify-between mb-6">
@@ -141,9 +141,9 @@ export default function FilterSidebar({
 
       {/* Sort */}
       <FilterSection title="Sort By">
-        <label htmlFor="filter-sort" className="sr-only">Sort By</label>
+        <label htmlFor={`${idPrefix}filter-sort`} className="sr-only">Sort By</label>
         <select
-          id="filter-sort"
+          id={`${idPrefix}filter-sort`}
           value={filters.sort}
           onChange={(e) => updateFilter("sort", e.target.value)}
           className="input-field text-sm"
@@ -158,9 +158,9 @@ export default function FilterSidebar({
 
       {/* Category */}
       <FilterSection title="Category">
-        <label htmlFor="filter-category" className="sr-only">Category</label>
+        <label htmlFor={`${idPrefix}filter-category`} className="sr-only">Category</label>
         <select
-          id="filter-category"
+          id={`${idPrefix}filter-category`}
           value={filters.category}
           onChange={(e) => updateFilter("category", e.target.value)}
           className="input-field text-sm"
@@ -225,9 +225,9 @@ export default function FilterSidebar({
            below the current min, max is raised to min (issue #954).     */}
       <FilterSection title="Budget (XLM)">
         <div className="flex gap-2">
-          <label htmlFor="filter-budget-min" className="sr-only">Minimum budget</label>
+          <label htmlFor={`${idPrefix}filter-budget-min`} className="sr-only">Minimum budget</label>
           <input
-            id="filter-budget-min"
+            id={`${idPrefix}filter-budget-min`}
             type="number"
             placeholder="Min"
             value={filters.minBudget}
@@ -242,9 +242,9 @@ export default function FilterSidebar({
             className="input-field text-sm"
             min={0}
           />
-          <label htmlFor="filter-budget-max" className="sr-only">Maximum budget</label>
+          <label htmlFor={`${idPrefix}filter-budget-max`} className="sr-only">Maximum budget</label>
           <input
-            id="filter-budget-max"
+            id={`${idPrefix}filter-budget-max`}
             type="number"
             placeholder="Max"
             value={filters.maxBudget}
@@ -297,7 +297,7 @@ export default function FilterSidebar({
     <>
       {/* Desktop: sticky sidebar */}
       <aside className="hidden lg:block w-64 shrink-0 sticky top-24 self-start">
-        <div className="card">{content}</div>
+        <div className="card">{renderContent("desktop-")}</div>
       </aside>
 
       {/* Mobile: drawer overlay */}
@@ -308,7 +308,7 @@ export default function FilterSidebar({
             onClick={onClose}
           />
           <div ref={drawerRef} className="absolute left-0 top-0 bottom-0 w-80 max-w-[85vw] bg-theme-card border-r border-theme-border p-6 overflow-y-auto shadow-2xl animate-slide-in-left">
-            {content}
+            {renderContent("mobile-")}
           </div>
         </div>
       )}
