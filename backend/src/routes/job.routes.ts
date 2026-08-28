@@ -1178,7 +1178,7 @@ router.delete(
   }),
 );
 
-// Update job status
+// Chain-owned job statuses must only be changed by the escrow event projection.
 router.patch(
   "/:id/status",
   authenticate,
@@ -1188,8 +1188,6 @@ router.patch(
   }),
   asyncHandler(async (req: AuthRequest, res: Response) => {
     const id = req.params.id as string;
-    const { status } = req.body;
-
     const job = await prisma.job.findFirst({
       where: {
         id,
@@ -1204,21 +1202,9 @@ router.patch(
       throw new AppError(ErrorCodes.FORBIDDEN, "Not authorized to update this job.", 403);
     }
 
-    const updated = await prisma.job.update({
-      where: { id },
-      data: { status },
-      include: { milestones: true },
+    return res.status(403).json({
+      error: "Job status is derived from verified escrow events and cannot be updated directly.",
     });
-
-    await invalidateCache("jobs:list:*");
-    await invalidateCacheKey(generateJobCacheKey(id));
-    void RecommendationQueueService.enqueueRebuild(id);
-
-    const { getIo } = await import("../socket");
-    const io = getIo();
-    io.emit("job:updated", { id, status });
-
-    res.json(updated);
   }),
 );
 
@@ -1230,13 +1216,7 @@ router.patch(
   asyncHandler(async (req: AuthRequest, res: Response) => {
     const id = req.params.id as string;
 
-    const job = await prisma.job.findFirst({
-      where: {
-        id,
-        deletedAt: null,
-      },
-      include: { milestones: true, freelancer: true },
-    });
+    const job = await prisma.job.findFirst({ where: { id, deletedAt: null } });
 
     if (!job) {
       throw new AppError(ErrorCodes.NOT_FOUND, "Job not found.", 404);
@@ -1245,42 +1225,9 @@ router.patch(
       throw new AppError(ErrorCodes.FORBIDDEN, "Only the client can mark the job as complete.", 403);
     }
 
-    const allApproved = job.milestones.every((m) => m.status === "APPROVED");
-    if (!allApproved) {
-      throw new AppError(ErrorCodes.VALIDATION_ERROR, "All milestones must be approved before completing the job.", 400);
-    }
-
-    const updated = await prisma.job.update({
-      where: { id },
-      data: { status: "COMPLETED" },
-      include: { milestones: true, client: true, freelancer: true },
+    return res.status(403).json({
+      error: "Job completion is derived from a verified escrow release and cannot be set directly.",
     });
-
-    const { NotificationService } =
-      await import("../services/notification.service");
-
-    if (job.freelancerId) {
-      await NotificationService.sendNotification({
-        userId: job.freelancerId,
-        type: "MILESTONE_APPROVED",
-        title: "Job Completed",
-        message: `The client has marked "${job.title}" as complete. Please leave a review!`,
-        metadata: { jobId: id },
-      });
-    }
-
-    const { getIo } = await import("../socket");
-    const io = getIo();
-    io.to(`user:${job.clientId}`).emit("job:completed", { jobId: id });
-    if (job.freelancerId) {
-      io.to(`user:${job.freelancerId}`).emit("job:completed", { jobId: id });
-    }
-
-    await invalidateCache("jobs:list:*");
-    await invalidateCacheKey(generateJobCacheKey(id));
-    void RecommendationQueueService.enqueueRebuild(id);
-
-    res.json(updated);
   }),
 );
 
