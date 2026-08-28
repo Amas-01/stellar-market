@@ -360,17 +360,30 @@ export class DeadlineExtensionService {
   static async confirmExtensionTransaction(
     extensionRequestId: string,
     txHash: string,
+    userId: string,
   ) {
     const extensionRequest = await prisma.deadlineExtensionRequest.findUnique({
       where: { id: extensionRequestId },
       include: {
         milestone: true,
-        job: true,
+        job: { include: { client: true, freelancer: true } },
       },
     });
 
     if (!extensionRequest) {
       throw createError("Extension request not found", 404);
+    }
+
+    // Validate the caller is a job participant (IDOR guard)
+    const job = extensionRequest.job;
+    const isClient = job.clientId === userId;
+    const isFreelancer = job.freelancerId === userId;
+
+    if (!isClient && !isFreelancer) {
+      throw createError(
+        "Only job participants can confirm extension transactions",
+        403,
+      );
     }
 
     // Update milestone deadline

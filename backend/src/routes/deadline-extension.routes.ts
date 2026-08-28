@@ -108,6 +108,7 @@ router.post(
       await DeadlineExtensionService.confirmExtensionTransaction(
         String(req.params.id),
         txHash,
+        req.userId!,
       );
 
     res.json(extensionRequest);
