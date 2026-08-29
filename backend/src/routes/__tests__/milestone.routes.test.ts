@@ -35,6 +35,7 @@ jest.mock("@prisma/client", () => {
     NotificationType: {
       MILESTONE_SUBMITTED: "MILESTONE_SUBMITTED",
       MILESTONE_APPROVED: "MILESTONE_APPROVED",
+      MILESTONE_REJECTED: "MILESTONE_REJECTED",
     },
   };
 });
@@ -256,6 +257,12 @@ describe("PATCH /api/milestones/:id/status", () => {
 
     expect(res.status).toBe(200);
     expect(res.body.status).toBe("REJECTED");
+    expect(NotificationService.sendNotification).toHaveBeenCalledWith(
+      expect.objectContaining({
+        userId: FREELANCER_ID,
+        type: "MILESTONE_REJECTED",
+      }),
+    );
   });
 
   it("rejects an invalid transition for the client role", async () => {
