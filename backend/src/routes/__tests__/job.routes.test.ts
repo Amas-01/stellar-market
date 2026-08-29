@@ -15,12 +15,18 @@ jest.mock("@prisma/client", () => {
   return { PrismaClient: jest.fn(() => mockPrisma) };
 });
 
+import { Request, Response, NextFunction } from "express";
+
+interface AuthRequest extends Request {
+  userId?: string;
+}
+
 jest.mock("../../middleware/auth", () => ({
-  authenticate: (req: any, res: any, next: any) => {
+  authenticate: (req: AuthRequest, res: Response, next: NextFunction) => {
     req.userId = "test-client-id";
     next();
   },
-  optionalAuthenticate: (req: any, res: any, next: any) => {
+  optionalAuthenticate: (req: AuthRequest, res: Response, next: NextFunction) => {
     req.userId = "test-client-id";
     next();
   },

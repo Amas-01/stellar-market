@@ -28,8 +28,14 @@ jest.mock("@prisma/client", () => {
   return { PrismaClient: jest.fn(() => mockPrisma) };
 });
 
+import { Request, Response, NextFunction } from "express";
+
+interface AuthRequest extends Request {
+  userId?: string;
+}
+
 jest.mock("../../middleware/auth", () => ({
-  authenticate: (req: any, res: any, next: any) => {
+  authenticate: (req: AuthRequest, res: Response, next: NextFunction) => {
     req.userId = "test-user-id";
     next();
   },
@@ -44,7 +50,17 @@ import { PrismaClient } from "@prisma/client";
 import authRoutes from "../auth.routes";
 import { errorHandler } from "../../middleware/error";
 
-const prismaMock = new PrismaClient() as any;
+const prismaMock = new PrismaClient() as unknown as {
+  user: {
+    findFirst: jest.Mock;
+    findUnique: jest.Mock;
+    update: jest.Mock;
+  };
+  refreshToken: {
+    updateMany: jest.Mock;
+    create: jest.Mock;
+  };
+};
 
 describe("Auth Routes - Password Reset / Change", () => {
   const app = express();
