@@ -81,7 +81,7 @@ export default function DeadlineExtensionModal({
     setError(null);
 
     try {
-      const token = localStorage.getItem("token");
+      const token = localStorage.getItem("stellarmarket_jwt");
 
       // Request extension
       const res = await axios.post(

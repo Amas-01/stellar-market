@@ -60,7 +60,7 @@ export default function DeadlineExtensionApprovalCard({
     setError(null);
 
     try {
-      const token = localStorage.getItem("token");
+      const token = localStorage.getItem("stellarmarket_jwt");
       await axios.post(
         `${API_URL}/deadline-extensions/${extensionRequest.id}/approve`,
         {},
@@ -88,7 +88,7 @@ export default function DeadlineExtensionApprovalCard({
     setError(null);
 
     try {
-      const token = localStorage.getItem("token");
+      const token = localStorage.getItem("stellarmarket_jwt");
       await axios.post(
         `${API_URL}/deadline-extensions/${extensionRequest.id}/reject`,
         { rejectionReason: rejectionReason.trim() },

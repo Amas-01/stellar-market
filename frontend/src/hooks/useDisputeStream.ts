@@ -66,7 +66,7 @@ async function consumeDisputeStream(
   onConnected: () => void,
   onDisconnected: () => void,
 ): Promise<void> {
-  const token = localStorage.getItem("token");
+  const token = localStorage.getItem("stellarmarket_jwt");
   const headers: Record<string, string> = {
     Accept: "text/event-stream",
     "Last-Event-ID": String(lastEventId),
