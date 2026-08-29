@@ -548,9 +548,9 @@ router.get(
           ...freelancer,
           reputation: reputation
             ? {
-                totalScore: reputation.total_score.toString(),
-                totalWeight: reputation.total_weight.toString(),
-                reviewCount: reputation.review_count,
+                totalScore: reputation.score.toString(),
+                totalWeight: reputation.endorsementWeight.toString(),
+                reviewCount: 0,
               }
             : null,
         };
@@ -644,9 +644,9 @@ router.get(
     res.json({
       ...freelancer,
       reputation: reputation ? {
-        totalScore: reputation.total_score.toString(),
-        totalWeight: reputation.total_weight.toString(),
-        reviewCount: reputation.review_count,
+        totalScore: reputation.score.toString(),
+        totalWeight: reputation.endorsementWeight.toString(),
+        reviewCount: 0,
       } : null
     });
   }),

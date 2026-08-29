@@ -338,7 +338,7 @@ router.patch(
     // Notify the freelancer when client rejects milestone
     if (!isFreelancer && status === "REJECTED") {
       await NotificationService.sendNotification({
-        userId: job.freelancerId,
+        userId: job.freelancerId as string,
         type: NotificationType.MILESTONE_REJECTED,
         title: "Milestone Rejected",
         message: `Client rejected milestone: ${milestone.title}`,
