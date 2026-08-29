@@ -1,5 +1,6 @@
 import request from "supertest";
 import express from "express";
+import { Request, Response, NextFunction } from "express";
 
 jest.mock("@prisma/client", () => {
   const mockPrisma = {
@@ -11,11 +12,12 @@ jest.mock("@prisma/client", () => {
       }),
       update: jest.fn(),
     },
+    user: {
+      findUnique: jest.fn().mockResolvedValue({ tokenVersion: 1 }),
+    },
   };
   return { PrismaClient: jest.fn(() => mockPrisma) };
 });
-
-import { Request, Response, NextFunction } from "express";
 
 interface AuthRequest extends Request {
   userId?: string;
@@ -32,14 +34,25 @@ jest.mock("../../middleware/auth", () => ({
   },
 }));
 
+import { PrismaClient } from "@prisma/client";
 import jobRoutes from "../job.routes";
 import { errorHandler } from "../../middleware/error";
+
+const prismaMock = new PrismaClient() as jest.Mocked<PrismaClient>;
+const jobMock = prismaMock.job as unknown as {
+  findFirst: jest.Mock;
+  update: jest.Mock;
+};
 
 describe("Job Routes - PUT /:id", () => {
   const app = express();
   app.use(express.json());
   app.use("/api/jobs", jobRoutes);
   app.use(errorHandler);
+
+  afterEach(() => {
+    jest.clearAllMocks();
+  });
 
   it("should reject setting status to COMPLETED directly via generic update", async () => {
     const response = await request(app)

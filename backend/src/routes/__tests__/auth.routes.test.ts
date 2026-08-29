@@ -1,5 +1,6 @@
 import request from "supertest";
 import express from "express";
+import { Request, Response, NextFunction } from "express";
 
 // ─── ESM module mocks ────────────────────────────────────────────────────────
 jest.mock("otplib", () => ({
@@ -28,8 +29,6 @@ jest.mock("@prisma/client", () => {
   return { PrismaClient: jest.fn(() => mockPrisma) };
 });
 
-import { Request, Response, NextFunction } from "express";
-
 interface AuthRequest extends Request {
   userId?: string;
 }
@@ -50,16 +49,15 @@ import { PrismaClient } from "@prisma/client";
 import authRoutes from "../auth.routes";
 import { errorHandler } from "../../middleware/error";
 
-const prismaMock = new PrismaClient() as unknown as {
-  user: {
-    findFirst: jest.Mock;
-    findUnique: jest.Mock;
-    update: jest.Mock;
-  };
-  refreshToken: {
-    updateMany: jest.Mock;
-    create: jest.Mock;
-  };
+const prismaMock = new PrismaClient() as jest.Mocked<PrismaClient>;
+const userMock = prismaMock.user as unknown as {
+  findFirst: jest.Mock;
+  findUnique: jest.Mock;
+  update: jest.Mock;
+};
+const refreshTokenMock = prismaMock.refreshToken as unknown as {
+  updateMany: jest.Mock;
+  create: jest.Mock;
 };
 
 describe("Auth Routes - Password Reset / Change", () => {
@@ -73,38 +71,38 @@ describe("Auth Routes - Password Reset / Change", () => {
   });
 
   it("POST /reset-password should revoke refresh tokens", async () => {
-    prismaMock.user.findFirst.mockResolvedValue({ id: "test-user-id" });
-    prismaMock.user.update.mockResolvedValue({ id: "test-user-id" });
-    prismaMock.refreshToken.updateMany.mockResolvedValue({ count: 1 });
+    userMock.findFirst.mockResolvedValue({ id: "test-user-id" });
+    userMock.update.mockResolvedValue({ id: "test-user-id" });
+    refreshTokenMock.updateMany.mockResolvedValue({ count: 1 });
 
     const response = await request(app)
       .post("/api/auth/reset-password")
       .send({ token: "some-token", password: "NewPassword123" });
 
     expect(response.status).toBe(200);
-    expect(prismaMock.refreshToken.updateMany).toHaveBeenCalledWith({
+    expect(refreshTokenMock.updateMany).toHaveBeenCalledWith({
       where: { userId: "test-user-id" },
       data: { revoked: true },
     });
   });
 
   it("POST /change-password should revoke refresh tokens", async () => {
-    prismaMock.user.findUnique.mockResolvedValue({
+    userMock.findUnique.mockResolvedValue({
       id: "test-user-id",
       password: "old-hashed-password",
     });
-    prismaMock.user.update.mockResolvedValue({
+    userMock.update.mockResolvedValue({
       id: "test-user-id",
       tokenVersion: 2,
     });
-    prismaMock.refreshToken.updateMany.mockResolvedValue({ count: 1 });
+    refreshTokenMock.updateMany.mockResolvedValue({ count: 1 });
 
     const response = await request(app)
       .post("/api/auth/change-password")
-      .send({ currentPassword: "oldpassword", newPassword: "NewPassword123" });
+      .send({ currentPassword: "OldPassword123", newPassword: "NewPassword123" });
 
     expect(response.status).toBe(200);
-    expect(prismaMock.refreshToken.updateMany).toHaveBeenCalledWith({
+    expect(refreshTokenMock.updateMany).toHaveBeenCalledWith({
       where: { userId: "test-user-id" },
       data: { revoked: true },
     });
