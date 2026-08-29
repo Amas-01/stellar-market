@@ -1119,6 +1119,15 @@ router.put(
 
     const updateData = req.body;
 
+    if (
+      updateData.status &&
+      ["COMPLETED", "DISPUTED", "CANCELLED", "REFUNDED"].includes(updateData.status)
+    ) {
+      return res.status(400).json({
+        error: `Cannot update job status to ${updateData.status} directly.`,
+      });
+    }
+
     if (updateData.category && !isValidCategory(updateData.category)) {
       return res.status(422).json({
         code: "InvalidCategory",
