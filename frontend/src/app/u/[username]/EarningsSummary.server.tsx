@@ -14,7 +14,7 @@ export default async function EarningsSummary({ userPromise }: Props) {
       <h3 className="text-lg font-semibold mb-3">Earnings</h3>
       {summary ? (
         <div>
-          <div className="text-2xl font-bold">{summary.total ?? 0}</div>
+          <div className="text-2xl font-bold">{(summary.total ?? 0).toLocaleString()} XLM</div>
           <div className="text-sm text-theme-text/60">Total earnings</div>
         </div>
       ) : (

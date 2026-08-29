@@ -326,7 +326,7 @@ function DisputeDetailContent() {
             </div>
           </div>
 
-          <div className="card border-theme-border border-2">
+          <div id="vote-panel" className="card border-theme-border border-2 scroll-mt-24">
             <h3 className="font-semibold text-theme-heading mb-4 flex items-center justify-center gap-2 text-lg">
               <ShieldCheck className="text-stellar-blue" />
               Cast Your Vote
