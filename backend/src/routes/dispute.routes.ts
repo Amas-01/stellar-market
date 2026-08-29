@@ -507,7 +507,11 @@ router.post(
     if (!signature || typeof signature !== "string") {
       return res.status(401).json({ error: "Missing signature" });
     }
-    const secret = process.env.WEBHOOK_SECRET || "default_secret";
+    const secret = process.env.WEBHOOK_SECRET;
+    if (!secret) {
+      return res.status(500).json({ error: "Server misconfiguration: webhook secret is not set." });
+    }
+    
     const computedSignature = crypto
       .createHmac("sha256", secret)
       .update(JSON.stringify(req.body))

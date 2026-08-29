@@ -811,6 +811,12 @@ router.post(
         tokenVersion: { increment: 1 },
       },
     });
+    
+    await prisma.refreshToken.updateMany({
+      where: { userId: user.id },
+      data: { revoked: true },
+    });
+    
     await invalidateTokenVersionCache(user.id);
 
     res.json({ message: "Password has been reset successfully." });
@@ -847,6 +853,12 @@ router.post(
       },
       select: { id: true, tokenVersion: true },
     });
+    
+    await prisma.refreshToken.updateMany({
+      where: { userId: user.id },
+      data: { revoked: true },
+    });
+    
     await invalidateTokenVersionCache(user.id);
 
     // Re-issue this session with the new tokenVersion so the caller is not

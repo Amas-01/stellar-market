@@ -99,6 +99,7 @@ export const updateJobSchema = z.object({
     .optional(),
   deadline: z.string().datetime("Invalid deadline format").optional(),
   category: z.string().min(2, "Category is required").optional(),
+  status: z.string().optional(),
 });
 
 export const getJobsQuerySchema = paginationSchema.extend({
