@@ -11,6 +11,7 @@ import { RecommendationQueueService } from "../services/recommendation-queue.ser
 import { FraudDetectionService } from "../services/fraud-detection.service";
 import {
   createJobSchema,
+  createJobWithMilestonesSchema,
   updateJobSchema,
   getJobsQuerySchema,
   getJobByIdParamSchema,
@@ -35,7 +36,7 @@ import {
   ContractService,
   RevisionProposalView,
 } from "../services/contract.service";
-import { MAX_PAGE_SIZE } from "../config";
+import { MAX_PAGE_SIZE, config } from "../config";
 
 const router = Router();
 
@@ -931,6 +932,167 @@ router.post(
   }),
 );
 
+// Atomically create a job together with all of its milestones (issue #1125).
+//
+// This replaces the frontend's old "POST /jobs then N× POST /milestones" loop,
+// which could leave a job persisted with a partial milestone set if a milestone
+// call failed midway, and could create a duplicate job if the user retried.
+//
+// Guarantees:
+//  - Atomic: the job and every milestone are written in a single transaction —
+//    either all succeed or nothing is persisted.
+//  - Idempotent: an optional client-supplied `idempotencyKey` is stored uniquely
+//    on the job. A retry with the same key returns the original job instead of
+//    creating a second one, even across concurrent requests (unique-constraint
+//    race is caught and resolved to the existing job).
+//  - Consistent budget: the job budget is derived from the sum of milestone
+//    amounts, so the persisted total can never diverge from the milestones.
+router.post(
+  "/with-milestones",
+  authenticate,
+  validate({ body: createJobWithMilestonesSchema }),
+  asyncHandler(async (req: AuthRequest, res: Response) => {
+    const user = await prisma.user.findUnique({
+      where: { id: req.userId },
+      select: { role: true },
+    });
+
+    if (!user || user.role !== "CLIENT") {
+      throw new AppError(ErrorCodes.FORBIDDEN, "Only clients can post jobs.", 403);
+    }
+
+    const {
+      title,
+      description,
+      skills,
+      deadline,
+      milestones,
+    } = req.body as {
+      title: string;
+      description: string;
+      skills: string[];
+      deadline: string;
+      milestones: Array<{
+        title: string;
+        description: string;
+        amount: number;
+        dueDate: string;
+      }>;
+    };
+    const category = req.body.category as string | undefined;
+    const paymentToken = req.body.paymentToken as string | undefined;
+    const idempotencyKey = req.body.idempotencyKey as string | undefined;
+
+    if (category && !isValidCategory(category)) {
+      return res.status(422).json({
+        code: "InvalidCategory",
+        message: `"${category}" is not a recognised category. Valid categories: ${VALID_CATEGORIES.join(", ")}.`,
+      });
+    }
+
+    // Budget is the sum of milestone amounts (7-dp rounded to match XLM scale),
+    // never taken from the client — this is what keeps the persisted total in
+    // lockstep with the milestone set.
+    const budget = Number(
+      milestones.reduce((sum, m) => sum + m.amount, 0).toFixed(7),
+    );
+    const platformMinimum = Number.isFinite(config.platformMinBudgetXlm)
+      ? config.platformMinBudgetXlm
+      : 1;
+    if (budget < platformMinimum) {
+      return res.status(422).json({
+        code: "BudgetBelowMinimum",
+        message: `Budget must be at least ${platformMinimum} XLM`,
+      });
+    }
+
+    // Idempotency fast-path: if we've already recorded this key, return the
+    // original job rather than creating another. A retry after a partial failure
+    // lands here and gets the completed job back.
+    if (idempotencyKey) {
+      const existing = await prisma.job.findUnique({
+        where: { idempotencyKey },
+        include: JOB_DETAIL_INCLUDE,
+      });
+      if (existing) {
+        if (existing.clientId !== req.userId) {
+          throw new AppError(
+            ErrorCodes.CONFLICT,
+            "This idempotency key belongs to another user's request.",
+            409,
+          );
+        }
+        return res.status(200).json(existing);
+      }
+    }
+
+    let job;
+    try {
+      // Nested writes in a single create are executed in one transaction by
+      // Prisma, so the job and all milestones commit together or not at all.
+      job = await prisma.$transaction((tx) =>
+        tx.job.create({
+          data: {
+            title,
+            description,
+            budget,
+            category: category || "General",
+            skills,
+            deadline: new Date(deadline),
+            clientId: req.userId!,
+            ...(paymentToken ? { paymentToken } : {}),
+            ...(idempotencyKey ? { idempotencyKey } : {}),
+            milestones: {
+              create: milestones.map((m, index) => ({
+                title: m.title,
+                description: m.description,
+                amount: m.amount,
+                dueDate: new Date(m.dueDate),
+                order: index + 1,
+              })),
+            },
+          },
+          include: JOB_DETAIL_INCLUDE,
+        }),
+      );
+    } catch (err) {
+      // Concurrent retry raced us to the same idempotency key: the unique
+      // constraint fired. Resolve to the job the other request created rather
+      // than surfacing an error or duplicating.
+      if (
+        idempotencyKey &&
+        err instanceof Prisma.PrismaClientKnownRequestError &&
+        err.code === "P2002"
+      ) {
+        const existing = await prisma.job.findUnique({
+          where: { idempotencyKey },
+          include: JOB_DETAIL_INCLUDE,
+        });
+        if (existing) {
+          return res.status(200).json(existing);
+        }
+      }
+      throw err;
+    }
+
+    await invalidateCache("jobs:list:*");
+    void RecommendationQueueService.enqueueRebuild(job.id);
+
+    // Near-real-time fraud/anomaly scoring (issue #900). Fire-and-forget.
+    FraudDetectionService.onJobCreated(job.id, req.userId!);
+
+    try {
+      const { getIo } = await import("../socket");
+      const io = getIo();
+      io.emit("job:created", job);
+    } catch {
+      // Socket not initialized (e.g., in tests)
+    }
+
+    res.status(201).json(job);
+  }),
+);
+
 // Update a job
 router.put(
   "/:id",
@@ -956,6 +1118,15 @@ router.put(
     }
 
     const updateData = req.body;
+
+    if (
+      updateData.status &&
+      ["COMPLETED", "DISPUTED", "CANCELLED", "REFUNDED"].includes(updateData.status)
+    ) {
+      return res.status(400).json({
+        error: `Cannot update job status to ${updateData.status} directly.`,
+      });
+    }
 
     if (updateData.category && !isValidCategory(updateData.category)) {
       return res.status(422).json({
@@ -1016,7 +1187,7 @@ router.delete(
   }),
 );
 
-// Update job status
+// Chain-owned job statuses must only be changed by the escrow event projection.
 router.patch(
   "/:id/status",
   authenticate,
@@ -1026,8 +1197,6 @@ router.patch(
   }),
   asyncHandler(async (req: AuthRequest, res: Response) => {
     const id = req.params.id as string;
-    const { status } = req.body;
-
     const job = await prisma.job.findFirst({
       where: {
         id,
@@ -1042,21 +1211,9 @@ router.patch(
       throw new AppError(ErrorCodes.FORBIDDEN, "Not authorized to update this job.", 403);
     }
 
-    const updated = await prisma.job.update({
-      where: { id },
-      data: { status },
-      include: { milestones: true },
+    return res.status(403).json({
+      error: "Job status is derived from verified escrow events and cannot be updated directly.",
     });
-
-    await invalidateCache("jobs:list:*");
-    await invalidateCacheKey(generateJobCacheKey(id));
-    void RecommendationQueueService.enqueueRebuild(id);
-
-    const { getIo } = await import("../socket");
-    const io = getIo();
-    io.emit("job:updated", { id, status });
-
-    res.json(updated);
   }),
 );
 
@@ -1068,13 +1225,7 @@ router.patch(
   asyncHandler(async (req: AuthRequest, res: Response) => {
     const id = req.params.id as string;
 
-    const job = await prisma.job.findFirst({
-      where: {
-        id,
-        deletedAt: null,
-      },
-      include: { milestones: true, freelancer: true },
-    });
+    const job = await prisma.job.findFirst({ where: { id, deletedAt: null } });
 
     if (!job) {
       throw new AppError(ErrorCodes.NOT_FOUND, "Job not found.", 404);
@@ -1083,42 +1234,9 @@ router.patch(
       throw new AppError(ErrorCodes.FORBIDDEN, "Only the client can mark the job as complete.", 403);
     }
 
-    const allApproved = job.milestones.every((m) => m.status === "APPROVED");
-    if (!allApproved) {
-      throw new AppError(ErrorCodes.VALIDATION_ERROR, "All milestones must be approved before completing the job.", 400);
-    }
-
-    const updated = await prisma.job.update({
-      where: { id },
-      data: { status: "COMPLETED" },
-      include: { milestones: true, client: true, freelancer: true },
+    return res.status(403).json({
+      error: "Job completion is derived from a verified escrow release and cannot be set directly.",
     });
-
-    const { NotificationService } =
-      await import("../services/notification.service");
-
-    if (job.freelancerId) {
-      await NotificationService.sendNotification({
-        userId: job.freelancerId,
-        type: "MILESTONE_APPROVED",
-        title: "Job Completed",
-        message: `The client has marked "${job.title}" as complete. Please leave a review!`,
-        metadata: { jobId: id },
-      });
-    }
-
-    const { getIo } = await import("../socket");
-    const io = getIo();
-    io.to(`user:${job.clientId}`).emit("job:completed", { jobId: id });
-    if (job.freelancerId) {
-      io.to(`user:${job.freelancerId}`).emit("job:completed", { jobId: id });
-    }
-
-    await invalidateCache("jobs:list:*");
-    await invalidateCacheKey(generateJobCacheKey(id));
-    void RecommendationQueueService.enqueueRebuild(id);
-
-    res.json(updated);
   }),
 );
 

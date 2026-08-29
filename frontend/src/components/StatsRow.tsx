@@ -5,7 +5,7 @@ import { Briefcase, CheckCircle2, DollarSign, Star } from "lucide-react";
 import { DashboardStatsSkeleton } from "./skeletons/DashboardSkeleton";
 import { useAuth } from "@/context/AuthContext";
 
-const API = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:5000/api";
+const API = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:5000/api/v1";
 
 interface FreelancerStats {
   totalEarnedXlm: number;

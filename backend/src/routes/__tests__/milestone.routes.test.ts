@@ -35,6 +35,7 @@ jest.mock("@prisma/client", () => {
     NotificationType: {
       MILESTONE_SUBMITTED: "MILESTONE_SUBMITTED",
       MILESTONE_APPROVED: "MILESTONE_APPROVED",
+      MILESTONE_REJECTED: "MILESTONE_REJECTED",
     },
   };
 });
@@ -220,16 +221,11 @@ describe("PATCH /api/milestones/:id/status", () => {
     expect(milestoneMock.update).not.toHaveBeenCalled();
   });
 
-  it("client can transition SUBMITTED -> APPROVED", async () => {
+  it("rejects client approval without a verified escrow transaction", async () => {
     milestoneMock.findUnique.mockResolvedValueOnce({
       id: MILESTONE_ID,
       status: "SUBMITTED",
       job: { id: JOB_ID, clientId: CLIENT_ID, freelancerId: FREELANCER_ID },
-    });
-    milestoneMock.update.mockResolvedValueOnce({
-      id: MILESTONE_ID,
-      jobId: JOB_ID,
-      status: "APPROVED",
     });
 
     const res = await request(app)
@@ -237,8 +233,9 @@ describe("PATCH /api/milestones/:id/status", () => {
       .set(authHeader(CLIENT_ID, "CLIENT"))
       .send({ status: "APPROVED" });
 
-    expect(res.status).toBe(200);
-    expect(res.body.status).toBe("APPROVED");
+    expect(res.status).toBe(403);
+    expect(res.body.error).toMatch(/Invalid status transition/);
+    expect(milestoneMock.update).not.toHaveBeenCalled();
   });
 
   it("client can transition SUBMITTED -> REJECTED", async () => {
@@ -260,6 +257,12 @@ describe("PATCH /api/milestones/:id/status", () => {
 
     expect(res.status).toBe(200);
     expect(res.body.status).toBe("REJECTED");
+    expect(NotificationService.sendNotification).toHaveBeenCalledWith(
+      expect.objectContaining({
+        userId: FREELANCER_ID,
+        type: "MILESTONE_REJECTED",
+      }),
+    );
   });
 
   it("rejects an invalid transition for the client role", async () => {

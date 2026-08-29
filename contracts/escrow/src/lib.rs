@@ -1292,26 +1292,83 @@ impl EscrowContract {
                     .ok_or(EscrowError::JobNotFound)?;
                 bump_job_ttl(&env, job_id);
 
-                // Compute the remaining escrowed balance (total minus already-approved milestones).
-                let approved_amount: i128 = job
-                    .milestones
-                    .iter()
-                    .filter(|m| m.status == MilestoneStatus::Approved)
-                    .map(|m| m.amount)
-                    .sum();
-                let withdrawable = job.total_amount - approved_amount;
+                // Distinguish between the two payment models for Approved milestones:
+                //
+                // - Immediate-payment model (`release_milestone` / `finalize_inactivity_approval`
+                //   / `release_partial_payment`): funds were already disbursed to the freelancer,
+                //   so `MilestoneDisbursed` > 0. These amounts are genuinely gone from escrow and
+                //   must NOT be withdrawn by admin (would be a double-spend on re-funded balance).
+                //
+                // - Deferred-payment model (`approve_milestone` / `approve_milestones_batch`):
+                //   the milestone is marked Approved but NO funds have left the contract yet
+                //   (`MilestoneDisbursed` == 0). If we simply exclude these amounts from
+                //   `withdrawable` and then cancel the job, the funds are permanently stranded
+                //   because `complete_job` (the only normal payout path) can never run on a
+                //   Cancelled job. We must pay the freelancer for these milestones here.
+                //
+                // `get_milestone_disbursed` returns the cumulative amount already paid out via
+                // the immediate-payment path; 0 means no payment has left escrow for that
+                // milestone, regardless of its Approved status.
+                let token_client = token::Client::new(&env, &job.token);
 
-                if withdrawable <= 0 {
+                // Amount of deferred-approved milestone funds that must be paid to the
+                // freelancer as part of this emergency action (default token only; multi-token
+                // deferred milestones are handled per-token in the token_balances loop below).
+                let mut deferred_to_freelancer: i128 = 0;
+
+                // Amount of already-disbursed milestone funds (immediate model); these are
+                // already out of escrow, so we exclude them from what the admin can withdraw.
+                let mut already_paid: i128 = 0;
+
+                for ms in job.milestones.iter() {
+                    if ms.status != MilestoneStatus::Approved {
+                        continue;
+                    }
+                    // Only count default-token milestones here; token_balances loop handles
+                    // the rest for multi-token jobs.
+                    if ms.token.is_some() {
+                        continue;
+                    }
+                    let disbursed = get_milestone_disbursed(&env, job_id, ms.id);
+                    if disbursed > 0 {
+                        // Immediate model: funds already left escrow. Exclude from withdrawable.
+                        already_paid = already_paid.saturating_add(ms.amount);
+                    } else {
+                        // Deferred model: funds still sit in escrow but are owed to the
+                        // freelancer. Pay them out now before the job becomes Cancelled.
+                        deferred_to_freelancer = deferred_to_freelancer.saturating_add(ms.amount);
+                    }
+                }
+
+                // Remaining escrowed default-token balance available for admin withdrawal:
+                // total funded minus what's already been paid (immediate model) minus what
+                // we are about to pay the freelancer (deferred model).
+                let withdrawable = job
+                    .total_amount
+                    .saturating_sub(already_paid)
+                    .saturating_sub(deferred_to_freelancer);
+
+                // At least one of deferred_to_freelancer or withdrawable must be > 0
+                // for there to be any action to take.
+                if deferred_to_freelancer <= 0 && withdrawable <= 0 {
                     return Err(EscrowError::NoFundsToWithdraw);
                 }
 
-                // Only transfer if the job held funded escrow.
+                // Only operate on jobs that actually hold escrowed funds.
                 if job.status == JobStatus::Funded
                     || job.status == JobStatus::InProgress
                     || job.status == JobStatus::Disputed
                 {
-                    // Withdraw the default token.
-                    let token_client = token::Client::new(&env, &job.token);
+                    // Pay deferred-approved milestone funds to the freelancer first.
+                    if deferred_to_freelancer > 0 {
+                        token_client.transfer(
+                            &env.current_contract_address(),
+                            &job.freelancer,
+                            &deferred_to_freelancer,
+                        );
+                    }
+
+                    // Withdraw the remaining default-token escrow balance to the admin recipient.
                     if withdrawable > 0 {
                         token_client.transfer(
                             &env.current_contract_address(),
@@ -1319,15 +1376,54 @@ impl EscrowContract {
                             &withdrawable,
                         );
                     }
-                    // Withdraw all non-default tokens for multi-token jobs.
+
+                    // For multi-token jobs, apply the same deferred-vs-immediate distinction
+                    // per non-default token bucket.
                     let tb_len = job.token_balances.len();
                     for idx in 0..tb_len {
                         let tb = job.token_balances.get(idx).unwrap();
-                        if tb.funded_amount > 0 {
-                            token::Client::new(&env, &tb.token).transfer(
+                        if tb.funded_amount <= 0 {
+                            continue;
+                        }
+                        let tb_token_client = token::Client::new(&env, &tb.token);
+
+                        // Identify deferred-approved amounts for this non-default token.
+                        let mut tb_deferred: i128 = 0;
+                        let mut tb_already_paid: i128 = 0;
+                        for ms in job.milestones.iter() {
+                            if ms.status != MilestoneStatus::Approved {
+                                continue;
+                            }
+                            if ms.token.as_ref() != Some(&tb.token) {
+                                continue;
+                            }
+                            let disbursed = get_milestone_disbursed(&env, job_id, ms.id);
+                            if disbursed > 0 {
+                                tb_already_paid = tb_already_paid.saturating_add(ms.amount);
+                            } else {
+                                tb_deferred = tb_deferred.saturating_add(ms.amount);
+                            }
+                        }
+
+                        // Pay deferred amounts to freelancer for this token.
+                        if tb_deferred > 0 {
+                            tb_token_client.transfer(
+                                &env.current_contract_address(),
+                                &job.freelancer,
+                                &tb_deferred,
+                            );
+                        }
+
+                        // Withdraw remaining funded balance (minus already-paid and deferred).
+                        let tb_withdrawable = tb
+                            .funded_amount
+                            .saturating_sub(tb_already_paid)
+                            .saturating_sub(tb_deferred);
+                        if tb_withdrawable > 0 {
+                            tb_token_client.transfer(
                                 &env.current_contract_address(),
                                 &recipient,
-                                &tb.funded_amount,
+                                &tb_withdrawable,
                             );
                         }
                     }
@@ -2428,6 +2524,14 @@ impl EscrowContract {
             token_client.transfer(&env.current_contract_address(), &job.freelancer, &freelancer_amount);
         }
 
+        // Record that the full nominal milestone amount has been disbursed so that
+        // EmergencyWithdraw recognises this as the immediate-payment model
+        // (MilestoneDisbursed > 0) and does NOT pay the freelancer a second time.
+        // release_milestone and release_partial_payment do the same thing; omitting
+        // this call here would cause a double-pay if EmergencyWithdraw runs after
+        // finalize_inactivity_approval.
+        record_milestone_disbursed(&env, job_id, milestone.id, milestone.amount);
+
         let updated = Milestone {
             id: milestone.id,
             description: milestone.description.clone(),
@@ -3329,6 +3433,26 @@ impl EscrowContract {
         require_state_not_terminal(&job)?;
         require_state_not_disputed(&job)?;
 
+        // Reject proposals that would orphan an active sub-assignment.
+        // A sub-assignment is keyed by milestone id; if the proposal drops or renumbers
+        // a milestone that carries an active sub-assignment, the sub-freelancer would have
+        // no remaining payout path after acceptance.
+        for old_ms in job.milestones.iter() {
+            let sub_key = DataKey::SubAssignment(job_id, old_ms.id);
+            if let Some(sub) = env
+                .storage()
+                .persistent()
+                .get::<DataKey, SubAssignment>(&sub_key)
+            {
+                if sub.status == SubAssignmentStatus::Active {
+                    let retained = new_milestones.iter().any(|m| m.id == old_ms.id);
+                    if !retained {
+                        return Err(EscrowError::InvalidStatus);
+                    }
+                }
+            }
+        }
+
         // 3. Assert no existing Pending proposal, allowing overwrite of expired ones
         if let Some(existing) = env
             .storage()
@@ -3519,6 +3643,42 @@ impl EscrowContract {
                 .any(|m| m.id == old_milestone.id && m.amount >= disbursed);
             if !still_covered {
                 return Err(EscrowError::RevisionBelowDisbursedAmount);
+            }
+        }
+
+        // Sub-assignment reconciliation: for every old milestone that carries an active
+        // sub-assignment, (a) block proposals that drop the milestone id entirely — the
+        // sub-freelancer would have no remaining payout path — and (b) proportionally
+        // scale the sub-amount when the milestone budget shrinks, so neither party is
+        // left with a disproportionate zero-payout. This is a safety net even when
+        // propose_revision already caught the orphan case, because a sub-assignment
+        // could be created in the window between propose and accept.
+        for old_ms in job.milestones.iter() {
+            let sub_key = DataKey::SubAssignment(job_id, old_ms.id);
+            let sub_opt: Option<SubAssignment> = env.storage().persistent().get(&sub_key);
+            if let Some(mut sub) = sub_opt {
+                if sub.status != SubAssignmentStatus::Active {
+                    continue;
+                }
+                let new_ms_opt = proposal.new_milestones.iter().find(|m| m.id == old_ms.id);
+                match new_ms_opt {
+                    None => {
+                        return Err(EscrowError::InvalidStatus);
+                    }
+                    Some(new_ms) if new_ms.amount < sub.amount => {
+                        // Scale proportionally: new_sub = sub.amount * new_ms.amount / old_ms.amount.
+                        // old_ms.amount > 0 is guaranteed by milestone validation at creation/propose time.
+                        let new_sub_amount = (sub.amount * new_ms.amount) / old_ms.amount;
+                        sub.amount = new_sub_amount;
+                        env.storage().persistent().set(&sub_key, &sub);
+                        env.storage().persistent().extend_ttl(
+                            &sub_key,
+                            TTL_THRESHOLD_LEDGERS,
+                            TTL_EXTEND_TO_LEDGERS,
+                        );
+                    }
+                    _ => {}
+                }
             }
         }
 

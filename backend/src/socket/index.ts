@@ -8,6 +8,8 @@ import { registerMessageHandlers } from "./messageHandlers";
 import { logger } from "../lib/logger";
 import { startNotificationWorker } from "../lib/notification-queue";
 import RedisClient from "../lib/redis";
+import { getCurrentTokenVersion } from "../lib/token-version";
+import { getCachedUserAuthData } from "../lib/user-cache";
 import {
   isUserOnline as isUserOnlineInRegistry,
   markSocketOnline,
@@ -71,7 +73,7 @@ export function initSocket(httpServer: HttpServer): SocketServer {
   });
 
   // JWT auth middleware — runs before every connection
-  io.use((socket, next) => {
+  io.use(async (socket, next) => {
     const token = socket.handshake.auth?.token as string | undefined;
 
     if (!token) {
@@ -79,7 +81,38 @@ export function initSocket(httpServer: HttpServer): SocketServer {
     }
 
     try {
-      const decoded = jwt.verify(token, config.jwtSecret) as { userId: string };
+      const decoded = jwt.verify(token, config.jwtSecret) as {
+        userId: string;
+        purpose?: string;
+        tokenVersion?: number;
+      };
+
+      // Reject 2FA-pending tokens (same as HTTP authenticate)
+      if (decoded.purpose === "2fa_pending") {
+        return next(new Error("Authentication error: 2FA verification required."));
+      }
+
+      // Reject tokens invalidated by a password change
+      const currentTokenVersion = await getCurrentTokenVersion(decoded.userId);
+      if (
+        currentTokenVersion !== null &&
+        (decoded.tokenVersion ?? 0) !== currentTokenVersion
+      ) {
+        return next(new Error("Authentication error: Token has been invalidated. Please log in again."));
+      }
+
+      // Verify user exists and is not deleted/suspended
+      const user = await getCachedUserAuthData(decoded.userId);
+      if (!user) {
+        return next(new Error("Authentication error: User not found."));
+      }
+      if (user.deletedAt) {
+        return next(new Error("Authentication error: Account deleted."));
+      }
+      if (user.isSuspended) {
+        return next(new Error("Authentication error: Account suspended."));
+      }
+
       (socket as AuthenticatedSocket).data.userId = decoded.userId;
       next();
     } catch {

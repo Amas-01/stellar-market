@@ -1,13 +1,26 @@
-import fs from "fs";
-import path from "path";
-import os from "os";
-import { Buffer } from "buffer";
 import crypto from "crypto";
+import {
+  FakeEvidenceObjectStore,
+  FakeRedisStore,
+} from "./testUtils/evidenceSessionFakes";
 
-// Mock the environment variable for SESSION_ROOT before importing the service
-const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "evidence-session-test-"));
-process.env.EVIDENCE_SESSION_DIR = tempDir;
-process.env.UPLOAD_DIR = tempDir;
+const fakeRedis = new FakeRedisStore();
+const fakeStore = new FakeEvidenceObjectStore();
+
+jest.mock("../lib/redis", () => ({
+  __esModule: true,
+  default: { getInstance: () => fakeRedis },
+}));
+
+jest.mock("../services/evidence-storage.service", () => ({
+  uploadEvidenceBuffer: jest.fn(async ({ key, body }: { key: string; body: Buffer }) => {
+    fakeStore.put(key, body);
+  }),
+  readEvidenceObject: jest.fn(async (key: string) => fakeStore.get(key)),
+  deleteEvidenceObjects: jest.fn(async (keys: string[]) => {
+    fakeStore.delete(keys);
+  }),
+}));
 
 import {
   validateInitiateInput,
@@ -16,6 +29,7 @@ import {
   assembleAndVerify,
   cleanupSession,
   getSession,
+  getReceivedChunks,
   deriveSessionId,
   CHUNK_SIZE,
   MIN_CHUNK_SIZE,
@@ -24,8 +38,9 @@ import {
 } from "../services/evidence-upload-session.service";
 
 describe("Evidence Upload Session Service", () => {
-  afterAll(() => {
-    fs.rmSync(tempDir, { recursive: true, force: true });
+  afterEach(() => {
+    fakeRedis.clear();
+    fakeStore.clear();
   });
 
   describe("validateInitiateInput", () => {
@@ -77,101 +92,127 @@ describe("Evidence Upload Session Service", () => {
       createdAt: new Date().toISOString(),
     };
 
-    let sessionId: string;
-
-    it("should initiate session idempotently", () => {
-      const result1 = initiateSession(input);
-      sessionId = result1.sessionId;
+    it("should initiate session idempotently", async () => {
+      const result1 = await initiateSession(input);
+      const sessionId = result1.sessionId;
       expect(result1.manifest.disputeId).toBe(input.disputeId);
-      
-      const result2 = initiateSession(input);
+
+      const result2 = await initiateSession(input);
       expect(result2.sessionId).toBe(sessionId);
       expect(result2.receivedChunks).toEqual([]);
     });
 
-    it("should wipe session on identity mismatch", () => {
-      // Modify size, which creates an identity mismatch
+    it("should wipe session on identity mismatch", async () => {
+      const { sessionId } = await initiateSession(input);
       const mismatchedInput = { ...input, size: CHUNK_SIZE + 2048 };
-      
-      // Since deriveSessionId uses only dispute, uploader, sha256
-      // the sessionId is the same, but the identity differs!
-      const result = initiateSession(mismatchedInput);
+
+      // Same (disputeId, uploaderId, sha256) => same derived id, different identity.
+      const result = await initiateSession(mismatchedInput);
       expect(result.sessionId).toBe(sessionId);
       expect(result.manifest.size).toBe(mismatchedInput.size);
     });
 
-    it("should validate chunk sizes and indexes", () => {
+    it("should validate chunk sizes and indexes", async () => {
+      const { sessionId } = await initiateSession(input);
       const data = Buffer.alloc(CHUNK_SIZE);
-      
-      // Index out of range
-      expect(() => saveChunk(sessionId, 5, data)).toThrow("Chunk index out of range");
-      
-      // Too large
-      expect(() => saveChunk(sessionId, 0, Buffer.alloc(MAX_CHUNK_SIZE + 1))).toThrow("Chunk larger than declared chunkSize");
-      
-      // Non-final chunk wrong size
-      expect(() => saveChunk(sessionId, 0, Buffer.alloc(CHUNK_SIZE - 1))).toThrow("Non-final chunk must be exactly chunkSize bytes");
+
+      await expect(saveChunk(sessionId, 5, data)).rejects.toThrow("Chunk index out of range");
+      await expect(saveChunk(sessionId, 0, Buffer.alloc(MAX_CHUNK_SIZE + 1))).rejects.toThrow(
+        "Chunk larger than declared chunkSize",
+      );
+      await expect(saveChunk(sessionId, 0, Buffer.alloc(CHUNK_SIZE - 1))).rejects.toThrow(
+        "Non-final chunk must be exactly chunkSize bytes",
+      );
     });
 
-    it("should save valid chunks", () => {
-      // Create fresh session
-      initiateSession(input);
+    it("should save valid chunks and persist chunk bytes in the object store", async () => {
+      const { sessionId } = await initiateSession(input);
 
       const chunk0 = Buffer.alloc(CHUNK_SIZE, "0");
-      const result0 = saveChunk(sessionId, 0, chunk0);
+      const result0 = await saveChunk(sessionId, 0, chunk0);
       expect(result0.receivedChunks).toEqual([0]);
 
       const chunk1 = Buffer.alloc(1024, "1");
-      const result1 = saveChunk(sessionId, 1, chunk1);
+      const result1 = await saveChunk(sessionId, 1, chunk1);
       expect(result1.receivedChunks).toEqual([0, 1]);
+
+      expect(await getReceivedChunks(sessionId)).toEqual([0, 1]);
     });
 
-    it("should assemble and verify (verified: false on mismatch)", () => {
-      // Re-initiate with an actual hash mismatch
+    it("re-saving an already-stored chunk is idempotent", async () => {
+      const { sessionId } = await initiateSession(input);
       const chunk0 = Buffer.alloc(CHUNK_SIZE, "0");
-      const chunk1 = Buffer.alloc(1024, "1");
-      
-      const fakeSha256 = crypto.createHash("sha256").update(Buffer.concat([chunk0, chunk1])).digest("hex");
-      
-      const realSha256 = "b".repeat(64); // Intentionally wrong
-      const mismatchedHashInput = { ...input, sha256: realSha256 };
-      initiateSession(mismatchedHashInput);
-      
-      const sid = mismatchedHashInput.sha256 === input.sha256 ? sessionId : deriveSessionId(input.disputeId, input.uploaderId, realSha256);
-      
-      saveChunk(sid, 0, chunk0);
-      saveChunk(sid, 1, chunk1);
-      
-      const assembled = assembleAndVerify(sid);
-      expect(assembled.verified).toBe(false);
-      expect(assembled.computedSha256).toBe(fakeSha256);
+
+      await saveChunk(sessionId, 0, chunk0);
+      const result = await saveChunk(sessionId, 0, chunk0);
+      expect(result.receivedChunks).toEqual([0]);
     });
-    
-    it("should assemble and verify (verified: true on match)", () => {
+
+    it("should reject a chunk for a session that doesn't exist", async () => {
+      const bogusId = "0".repeat(64);
+      await expect(saveChunk(bogusId, 0, Buffer.alloc(CHUNK_SIZE))).rejects.toThrow("Session not found");
+    });
+
+    it("should assemble and verify (verified: false on hash mismatch)", async () => {
       const chunk0 = Buffer.alloc(CHUNK_SIZE, "0");
       const chunk1 = Buffer.alloc(1024, "1");
-      
+      const actualSha256 = crypto.createHash("sha256").update(Buffer.concat([chunk0, chunk1])).digest("hex");
+      const declaredWrongSha256 = "b".repeat(64);
+
+      const { sessionId } = await initiateSession({ ...input, sha256: declaredWrongSha256 });
+      await saveChunk(sessionId, 0, chunk0);
+      await saveChunk(sessionId, 1, chunk1);
+
+      const assembled = await assembleAndVerify(sessionId);
+      expect(assembled.verified).toBe(false);
+      expect(assembled.computedSha256).toBe(actualSha256);
+    });
+
+    it("should assemble and verify (verified: true on match)", async () => {
+      const chunk0 = Buffer.alloc(CHUNK_SIZE, "0");
+      const chunk1 = Buffer.alloc(1024, "1");
       const realSha256 = crypto.createHash("sha256").update(Buffer.concat([chunk0, chunk1])).digest("hex");
-      
-      const matchedHashInput = { ...input, sha256: realSha256 };
-      initiateSession(matchedHashInput);
-      const sid = deriveSessionId(input.disputeId, input.uploaderId, realSha256);
-      
-      saveChunk(sid, 0, chunk0);
-      saveChunk(sid, 1, chunk1);
-      
-      const assembled = assembleAndVerify(sid);
+
+      const { sessionId } = await initiateSession({ ...input, sha256: realSha256 });
+      await saveChunk(sessionId, 0, chunk0);
+      await saveChunk(sessionId, 1, chunk1);
+
+      const assembled = await assembleAndVerify(sessionId);
       expect(assembled.verified).toBe(true);
       expect(assembled.computedSha256).toBe(realSha256);
     });
 
-    it("should cleanup session", () => {
-      const sid = deriveSessionId(input.disputeId, input.uploaderId, input.sha256);
-      initiateSession(input);
-      expect(getSession(sid)).not.toBeNull();
-      
-      cleanupSession(sid);
-      expect(getSession(sid)).toBeNull();
+    it("should reject assembly while a chunk is still missing", async () => {
+      const { sessionId } = await initiateSession(input);
+      await saveChunk(sessionId, 0, Buffer.alloc(CHUNK_SIZE));
+      await expect(assembleAndVerify(sessionId)).rejects.toThrow("Missing chunk 1");
+    });
+
+    it("should cleanup a session's manifest, chunk index, and object-store bytes", async () => {
+      const { sessionId } = await initiateSession(input);
+      await saveChunk(sessionId, 0, Buffer.alloc(CHUNK_SIZE));
+
+      expect(await getSession(sessionId)).not.toBeNull();
+
+      await cleanupSession(sessionId);
+
+      expect(await getSession(sessionId)).toBeNull();
+      expect(await getReceivedChunks(sessionId)).toEqual([]);
+    });
+
+    it("cleanupSession on a session that never existed is a no-op, not an error", async () => {
+      const bogusId = "f".repeat(64);
+      await expect(cleanupSession(bogusId)).resolves.toBeUndefined();
+    });
+  });
+
+  describe("deriveSessionId", () => {
+    it("is a pure function of (disputeId, uploaderId, sha256)", () => {
+      const a = deriveSessionId("d1", "u1", "a".repeat(64));
+      const b = deriveSessionId("d1", "u1", "a".repeat(64));
+      const c = deriveSessionId("d1", "u1", "b".repeat(64));
+      expect(a).toBe(b);
+      expect(a).not.toBe(c);
     });
   });
 });

@@ -30,7 +30,9 @@ const freelancerTransitions: Record<string, string[]> = {
 };
 
 const clientTransitions: Record<string, string[]> = {
-  SUBMITTED: ["APPROVED", "REJECTED"],
+  // Approval is chain-owned and can only be projected by the verified
+  // escrow confirmation path; clients may only reject a submission here.
+  SUBMITTED: ["REJECTED"],
 };
 
 // List milestones for a job
@@ -329,6 +331,17 @@ router.patch(
         type: NotificationType.MILESTONE_SUBMITTED,
         title: "Milestone Submitted",
         message: `Freelancer submitted milestone: ${milestone.title}`,
+        metadata: { jobId: job.id, milestoneId: id },
+      });
+    }
+
+    // Notify the freelancer when client rejects milestone
+    if (!isFreelancer && status === "REJECTED") {
+      await NotificationService.sendNotification({
+        userId: job.freelancerId as string,
+        type: NotificationType.MILESTONE_REJECTED,
+        title: "Milestone Rejected",
+        message: `Client rejected milestone: ${milestone.title}`,
         metadata: { jobId: job.id, milestoneId: id },
       });
     }

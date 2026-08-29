@@ -6,7 +6,7 @@ import { asyncHandler } from "../middleware/error";
 import { validate } from "../middleware/validation";
 import { freelancerSearchQuerySchema, getUserByIdParamSchema } from "../schemas";
 import { searchFreelancers } from "../services/freelancer-search.service";
-import { ReputationService } from "../services/reputation.service";
+import { ReputationCacheService } from "../services/reputation-cache.service";
 import {
   fetchOnChainPayments,
   loadDbEarnings,
@@ -541,16 +541,16 @@ router.get(
     // Fetch on-chain reputation for each freelancer
     const freelancersWithReputation = await Promise.all(
       topFreelancers.map(async (freelancer) => {
-        const reputation = await ReputationService.getReputation(
+        const reputation = await ReputationCacheService.getCachedReputation(
           freelancer.walletAddress ?? ""
         );
         return {
           ...freelancer,
           reputation: reputation
             ? {
-                totalScore: reputation.total_score.toString(),
-                totalWeight: reputation.total_weight.toString(),
-                reviewCount: reputation.review_count,
+                totalScore: reputation.score.toString(),
+                totalWeight: reputation.endorsementWeight.toString(),
+                reviewCount: 0,
               }
             : null,
         };
@@ -639,14 +639,14 @@ router.get(
       return res.status(304).end();
     }
 
-    const reputation = await ReputationService.getReputation(freelancer.walletAddress ?? "");
+    const reputation = await ReputationCacheService.getCachedReputation(freelancer.walletAddress ?? "");
 
     res.json({
       ...freelancer,
       reputation: reputation ? {
-        totalScore: reputation.total_score.toString(),
-        totalWeight: reputation.total_weight.toString(),
-        reviewCount: reputation.review_count,
+        totalScore: reputation.score.toString(),
+        totalWeight: reputation.endorsementWeight.toString(),
+        reviewCount: 0,
       } : null
     });
   }),

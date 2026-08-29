@@ -60,7 +60,27 @@ export class FakeRedisClient extends EventEmitter {
   }
 
   async get(key: string): Promise<string | null> {
-    return this.read(key);
+    const stored = this.read(key);
+    if (stored !== null) return stored;
+
+    // Synthesise auth cache entries that token-version.ts and user-cache.ts
+    // look up on every authenticated request.  Without these, every socket
+    // connection would fall through to prisma.user.findUnique and either
+    // consume a mock slot or return null (causing "User not found").
+    if (key.startsWith("auth:tokenVersion:")) return "0";
+    if (key.startsWith("auth:user:")) {
+      const userId = key.replace("auth:user:", "");
+      return JSON.stringify({
+        id: userId,
+        role: "CLIENT",
+        emailVerified: true,
+        deletedAt: null,
+        isSuspended: false,
+        suspendReason: null,
+      });
+    }
+
+    return null;
   }
 
   async set(key: string, value: string, ...args: unknown[]): Promise<"OK"> {
@@ -70,6 +90,11 @@ export class FakeRedisClient extends EventEmitter {
       expiresAt = Date.now() + Number(args[exIndex + 1]) * 1000;
     }
     this.bus.store.set(key, { value: String(value), expiresAt });
+    return "OK";
+  }
+
+  async setex(key: string, seconds: number, value: string | number): Promise<"OK"> {
+    this.bus.store.set(key, { value: String(value), expiresAt: Date.now() + seconds * 1000 });
     return "OK";
   }
 

@@ -105,6 +105,39 @@ const CONFIRM_TYPE_ENDPOINT: Partial<Record<PendingOnChainAction["confirmType"],
   CLAIM_REFUND: "/escrow/init-refund",
 };
 
+// Saved after a successful broadcast but before (or after a failed) confirm-tx
+// call.  Persisted to localStorage so it survives a page reload.  The retry
+// path re-sends this hash to confirm-tx without re-signing or re-broadcasting.
+type PendingConfirmation = {
+  hash: string;
+  confirmType: PendingOnChainAction["confirmType"];
+  milestoneId?: string;
+  newDeadline?: string;
+  onChainJobId?: number | string;
+};
+
+// Unique key per action so concurrent approvals on different milestones each
+// get their own slot rather than the latter overwriting the former.
+function confirmActionKey(
+  confirmType: PendingOnChainAction["confirmType"],
+  milestoneId?: string,
+): string {
+  return `${confirmType}:${milestoneId ?? ""}`;
+}
+
+const CONFIRM_TYPE_LABEL: Partial<Record<PendingOnChainAction["confirmType"], string>> = {
+  FUND_JOB: "Fund escrow",
+  APPROVE_MILESTONE: "Approve milestone",
+  CANCEL_JOB: "Cancel and refund",
+  CLAIM_REFUND: "Claim refund",
+  SUBMIT_MILESTONE: "Submit milestone",
+  PROPOSE_REVISION: "Propose revision",
+  ACCEPT_REVISION: "Accept revision",
+  REJECT_REVISION: "Reject revision",
+  EXTEND_DEADLINE: "Extend deadline",
+  CREATE_JOB: "Initialize escrow",
+};
+
 export default function JobDetailClient({
   initialJob,
 }: {
@@ -259,6 +292,7 @@ export default function JobDetailClient({
   >(null);
   const [extendDeadlineDate, setExtendDeadlineDate] = useState<Record<string, string>>({});
   const [pendingOnChainAction, setPendingOnChainAction] = useState<PendingOnChainAction | null>(null);
+  const [pendingConfirmations, setPendingConfirmations] = useState<Record<string, PendingConfirmation>>({});
   const [selectedPaymentToken, setSelectedPaymentToken] = useState<(typeof PAYMENT_TOKENS)[number]>("XLM");
   const [approveMilestoneModalId, setApproveMilestoneModalId] = useState<string | null>(null);
 
@@ -273,6 +307,88 @@ export default function JobDetailClient({
   const fetchApplications = useCallback(async () => {
     await queryClient.invalidateQueries({ queryKey: ["applications", id] });
   }, [queryClient, id]);
+
+  // Restore any in-flight confirmations from localStorage on mount so page
+  // reloads after a successful broadcast still show the retry banner.
+  useEffect(() => {
+    try {
+      const prefix = `sm_pending_confirm_${String(id)}:`;
+      const restored: Record<string, PendingConfirmation> = {};
+      for (let i = 0; i < localStorage.length; i++) {
+        const key = localStorage.key(i);
+        if (!key?.startsWith(prefix)) continue;
+        const raw = localStorage.getItem(key);
+        if (!raw) continue;
+        const conf = JSON.parse(raw) as PendingConfirmation;
+        restored[confirmActionKey(conf.confirmType, conf.milestoneId)] = conf;
+      }
+      if (Object.keys(restored).length > 0) setPendingConfirmations(restored);
+    } catch {
+      // localStorage unavailable or malformed — ignore
+    }
+  }, [id]);
+
+  const savePendingConfirmation = useCallback((conf: PendingConfirmation) => {
+    try {
+      const storageKey = `sm_pending_confirm_${String(id)}:${confirmActionKey(conf.confirmType, conf.milestoneId)}`;
+      localStorage.setItem(storageKey, JSON.stringify(conf));
+    } catch {
+      // localStorage unavailable — in-memory state is the fallback
+    }
+    const actionKey = confirmActionKey(conf.confirmType, conf.milestoneId);
+    setPendingConfirmations((prev) => ({ ...prev, [actionKey]: conf }));
+  }, [id]);
+
+  const clearPendingConfirmation = useCallback(
+    (confirmType: PendingOnChainAction["confirmType"], milestoneId?: string) => {
+      try {
+        const storageKey = `sm_pending_confirm_${String(id)}:${confirmActionKey(confirmType, milestoneId)}`;
+        localStorage.removeItem(storageKey);
+      } catch {
+        // ignore
+      }
+      const actionKey = confirmActionKey(confirmType, milestoneId);
+      setPendingConfirmations((prev) => {
+        const next = { ...prev };
+        delete next[actionKey];
+        return next;
+      });
+    },
+    [id],
+  );
+
+  const retryConfirmation = useCallback(async (conf: PendingConfirmation) => {
+    setError(null);
+    setProcessing(true);
+    try {
+      const token = localStorage.getItem("stellarmarket_jwt") ?? localStorage.getItem("token");
+      await axios.post(
+        `${API_URL}/escrow/confirm-tx`,
+        {
+          hash: conf.hash,
+          type: conf.confirmType,
+          jobId: id,
+          milestoneId: conf.milestoneId,
+          newDeadline: conf.newDeadline,
+          onChainJobId: conf.onChainJobId,
+        },
+        { headers: { Authorization: `Bearer ${token}` } },
+      );
+      clearPendingConfirmation(conf.confirmType, conf.milestoneId);
+      await fetchJob();
+      if (conf.confirmType === "APPROVE_MILESTONE" && conf.milestoneId) {
+        setRecentlyApprovedMilestoneId(conf.milestoneId);
+      }
+    } catch (err: unknown) {
+      setError(
+        err instanceof Error
+          ? err.message
+          : "Confirmation retry failed. Please try again.",
+      );
+    } finally {
+      setProcessing(false);
+    }
+  }, [id, clearPendingConfirmation, fetchJob]);
 
   const handleApplicationStatus = async (
     appId: string,
@@ -429,6 +545,18 @@ export default function JobDetailClient({
         onChainJobId = parseJobIdFromResult(txResult.resultXdr);
       }
 
+      // Broadcast succeeded — close the XDR modal immediately and persist the
+      // hash before the fallible backend call.  If confirm-tx fails, the retry
+      // banner lets the user confirm the same hash without re-broadcasting.
+      savePendingConfirmation({
+        hash: txResult.hash!,
+        confirmType: action.confirmType,
+        milestoneId: action.milestoneId,
+        newDeadline: action.newDeadline,
+        onChainJobId,
+      });
+      setPendingOnChainAction(null);
+
       await axios.post(
         `${API_URL}/escrow/confirm-tx`,
         {
@@ -444,7 +572,7 @@ export default function JobDetailClient({
         },
       );
 
-      setPendingOnChainAction(null);
+      clearPendingConfirmation(action.confirmType, action.milestoneId);
       await fetchJob();
 
       if (
@@ -474,6 +602,10 @@ export default function JobDetailClient({
       }
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : "Action failed.");
+      // If pendingConfirmation was saved (broadcast succeeded), the XDR modal
+      // is already closed and the retry banner guides the user.
+      // If broadcast failed, pendingConfirmation was never set and the modal
+      // remains open so the user can try signing again.
     } finally {
       setConfirmingMilestoneId(null);
       setProcessing(false);
@@ -702,21 +834,36 @@ export default function JobDetailClient({
         throw new Error(txResult.error || "Transaction failed");
       }
 
-      await axios.post(
-        `${API_URL}/escrow/confirm-tx`,
-        {
-          hash: txResult.hash,
-          type: "APPROVE_MILESTONE",
-          jobId: id,
-          milestoneId,
-        },
-        { headers: { Authorization: `Bearer ${token}` } },
-      );
+      // Broadcast succeeded — save the hash before the fallible backend call
+      // so a confirm-tx failure can be retried without re-broadcasting.
+      savePendingConfirmation({
+        hash: txResult.hash!,
+        confirmType: "APPROVE_MILESTONE",
+        milestoneId,
+      });
 
-      await fetchJob();
-      setRecentlyApprovedMilestoneId(milestoneId);
+      try {
+        await axios.post(
+          `${API_URL}/escrow/confirm-tx`,
+          { hash: txResult.hash, type: "APPROVE_MILESTONE", jobId: id, milestoneId },
+          { headers: { Authorization: `Bearer ${token}` } },
+        );
+        clearPendingConfirmation("APPROVE_MILESTONE", milestoneId);
+        await fetchJob();
+        setRecentlyApprovedMilestoneId(milestoneId);
+      } catch (confirmErr: unknown) {
+        // The on-chain release already succeeded. Never roll back the milestone
+        // status — the retry banner guides the user to re-confirm with the same
+        // hash without re-broadcasting.
+        setError(
+          confirmErr instanceof Error
+            ? confirmErr.message
+            : "Transaction confirmed on-chain but the server has not recorded it yet. Use the retry button above to complete confirmation.",
+        );
+      }
     } catch (err: unknown) {
-      // Roll back optimistic milestone status if on-chain confirmation fails.
+      // Broadcast failed — safe to revert the optimistic update since nothing
+      // moved on-chain.
       setJob((prev) =>
         prev
           ? {
@@ -730,7 +877,7 @@ export default function JobDetailClient({
                           ?.status ?? m.status,
                     }
                   : m,
-                ),
+              ),
             }
           : prev,
       );
@@ -741,7 +888,6 @@ export default function JobDetailClient({
       setConfirmingMilestoneId(null);
       setActioningMilestoneId(null);
     }
-    await handleEscrowAction("approve", milestoneId);
   };
 
   const handleRevisionEscrow = async (
@@ -877,6 +1023,34 @@ export default function JobDetailClient({
       >
         <ArrowLeft size={18} /> Back to Jobs
       </Link>
+
+      {Object.values(pendingConfirmations).map((conf) => (
+        <div
+          key={confirmActionKey(conf.confirmType, conf.milestoneId)}
+          className="mb-4 p-4 bg-theme-warning/10 border border-theme-warning/20 rounded-lg flex items-start gap-3"
+        >
+          <AlertCircle className="flex-shrink-0 mt-0.5 text-theme-warning" size={18} />
+          <div className="flex-1 min-w-0">
+            <p className="text-sm font-medium text-theme-heading">
+              {CONFIRM_TYPE_LABEL[conf.confirmType] ?? conf.confirmType} — confirmation pending
+            </p>
+            <p className="text-sm text-theme-text mt-1">
+              The transaction was broadcast to the Stellar network but the server has not yet
+              recorded the result. The on-chain action may already be complete. Retry to sync
+              without re-signing or re-broadcasting.
+            </p>
+          </div>
+          <button
+            type="button"
+            disabled={processing}
+            onClick={() => void retryConfirmation(conf)}
+            className="flex-shrink-0 btn-primary text-sm py-1.5 px-4 flex items-center gap-2"
+          >
+            {processing ? <Loader2 className="animate-spin" size={14} /> : null}
+            Retry
+          </button>
+        </div>
+      ))}
 
       {error && (
         <div className="mb-6 p-4 bg-theme-error/10 border border-theme-error/20 rounded-lg flex items-start gap-3 text-theme-error">

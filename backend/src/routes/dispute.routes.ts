@@ -507,7 +507,11 @@ router.post(
     if (!signature || typeof signature !== "string") {
       return res.status(401).json({ error: "Missing signature" });
     }
-    const secret = process.env.WEBHOOK_SECRET || "default_secret";
+    const secret = process.env.WEBHOOK_SECRET;
+    if (!secret) {
+      return res.status(500).json({ error: "Server misconfiguration: webhook secret is not set." });
+    }
+    
     const computedSignature = crypto
       .createHmac("sha256", secret)
       .update(JSON.stringify(req.body))
@@ -711,7 +715,7 @@ router.post(
       return res.status(400).json({ error: reason });
     }
 
-    const { sessionId, manifest, receivedChunks } = initiateSession({
+    const { sessionId, manifest, receivedChunks } = await initiateSession({
       disputeId,
       uploaderId: req.userId!,
       originalName: body.originalName,
@@ -742,14 +746,14 @@ router.get(
   validate({ params: evidenceSessionParamSchema }),
   asyncHandler(async (req: AuthRequest, res: Response) => {
     const { sessionId } = req.params as unknown as { sessionId: string };
-    const manifest = getSession(sessionId);
+    const manifest = await getSession(sessionId);
     if (!manifest) {
       return res.status(404).json({ error: "Upload session not found" });
     }
     return res.status(200).json({
       sessionId,
       totalChunks: manifest.totalChunks,
-      receivedChunks: getReceivedChunks(sessionId),
+      receivedChunks: await getReceivedChunks(sessionId),
     });
   }),
 );
@@ -770,7 +774,7 @@ router.put(
       index: string;
     };
 
-    const manifest = getSession(sessionId);
+    const manifest = await getSession(sessionId);
     if (!manifest) {
       return res.status(404).json({ error: "Upload session not found" });
     }
@@ -789,7 +793,7 @@ router.put(
 
     let receivedChunks: number[];
     try {
-      ({ receivedChunks } = saveChunk(sessionId, Number(index), req.body));
+      ({ receivedChunks } = await saveChunk(sessionId, Number(index), req.body));
     } catch (err) {
       const message =
         err instanceof Error ? err.message : "Failed to store chunk";
@@ -812,7 +816,7 @@ router.post(
   validate({ params: evidenceSessionParamSchema }),
   asyncHandler(async (req: AuthRequest, res: Response) => {
     const { sessionId } = req.params as unknown as { sessionId: string };
-    const manifest = getSession(sessionId);
+    const manifest = await getSession(sessionId);
     if (!manifest) {
       return res.status(404).json({ error: "Upload session not found" });
     }
@@ -827,7 +831,7 @@ router.post(
 
     let assembled;
     try {
-      assembled = assembleAndVerify(sessionId);
+      assembled = await assembleAndVerify(sessionId);
     } catch (err) {
       const message =
         err instanceof Error ? err.message : "Failed to assemble file";
@@ -835,7 +839,7 @@ router.post(
     }
 
     if (!assembled.verified) {
-      cleanupSession(sessionId);
+      await cleanupSession(sessionId);
       return res.status(422).json({
         error:
           "Integrity check failed: server-computed hash does not match the declared hash",
@@ -846,7 +850,7 @@ router.post(
 
     const validation = await validateFileMimeType(assembled.filePath);
     if (!validation.valid) {
-      cleanupSession(sessionId);
+      await cleanupSession(sessionId);
       return res.status(415).json({
         error: validation.error || "Unsupported file type",
       });
@@ -861,7 +865,7 @@ router.post(
       });
     } finally {
       // The assembled file exists only while validating + uploading it.
-      cleanupSession(sessionId);
+      await cleanupSession(sessionId);
     }
 
     const candidateAnchorTx = manifest.anchorTxHash || null;
@@ -911,7 +915,7 @@ router.delete(
   validate({ params: evidenceSessionParamSchema }),
   asyncHandler(async (req: AuthRequest, res: Response) => {
     const { sessionId } = req.params as unknown as { sessionId: string };
-    const manifest = getSession(sessionId);
+    const manifest = await getSession(sessionId);
     if (!manifest) {
       return res.status(404).json({ error: "Upload session not found" });
     }
@@ -922,7 +926,7 @@ router.delete(
     if (!access.allowed) {
       return res.status(access.status).json({ error: access.error });
     }
-    cleanupSession(sessionId);
+    await cleanupSession(sessionId);
     return res.status(200).json({ sessionId, aborted: true });
   }),
 );

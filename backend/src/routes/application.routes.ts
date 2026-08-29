@@ -314,6 +314,9 @@ router.put(
         .status(403)
         .json({ error: "Not authorized to update this application." });
     }
+    if (application.status !== "PENDING") {
+      return res.status(409).json({ error: "Cannot edit an accepted or rejected application." });
+    }
 
     const updated = await prisma.application.update({
       where: { id },

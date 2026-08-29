@@ -39,7 +39,7 @@ interface ClientEarningsResponse {
 }
 
 const authHeader = () => ({
-  Authorization: `Bearer ${typeof window !== "undefined" ? localStorage.getItem("token") : ""}`,
+  Authorization: `Bearer ${typeof window !== "undefined" ? localStorage.getItem("stellarmarket_jwt") : ""}`,
 });
 
 const ClientEarningsPage = () => {

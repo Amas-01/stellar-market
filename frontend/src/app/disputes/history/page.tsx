@@ -35,7 +35,7 @@ export default function DisputeHistoryPage() {
   useEffect(() => {
     const fetchDisputeHistory = async () => {
       try {
-        const token = localStorage.getItem("token");
+        const token = localStorage.getItem("stellarmarket_jwt");
         const res = await axios.get(`${API_URL}/disputes/history`, {
           headers: token ? { Authorization: `Bearer ${token}` } : {},
           params: { filter, sortBy },
