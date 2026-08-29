@@ -34,11 +34,8 @@ jest.mock("../../middleware/auth", () => ({
   },
 }));
 
-import { PrismaClient } from "@prisma/client";
 import jobRoutes from "../job.routes";
 import { errorHandler } from "../../middleware/error";
-
-const prismaMock = new PrismaClient() as jest.Mocked<PrismaClient>;
 
 describe("Job Routes - PUT /:id", () => {
   const app = express();
