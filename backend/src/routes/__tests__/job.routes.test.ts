@@ -39,10 +39,6 @@ import jobRoutes from "../job.routes";
 import { errorHandler } from "../../middleware/error";
 
 const prismaMock = new PrismaClient() as jest.Mocked<PrismaClient>;
-const jobMock = prismaMock.job as unknown as {
-  findFirst: jest.Mock;
-  update: jest.Mock;
-};
 
 describe("Job Routes - PUT /:id", () => {
   const app = express();
