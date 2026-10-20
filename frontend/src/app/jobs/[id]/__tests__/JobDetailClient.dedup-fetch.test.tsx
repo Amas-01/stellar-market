@@ -59,8 +59,8 @@ jest.mock("@/components/WalletAddress", () => ({ address }: { address: string })
 jest.mock("next/link", () => ({ href, children, ...rest }: any) => <a href={href} {...rest}>{children}</a>);
 jest.mock("@/utils/stellar", () => ({ parseJobIdFromResult: jest.fn() }));
 jest.mock("@/constants/jobs", () => ({
+  ...jest.requireActual("@/constants/jobs"),
   PAYMENT_TOKENS: ["XLM"],
-  TOKEN_EXCHANGE_RATES: { XLM: 1 },
 }));
 
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
