@@ -1,12 +1,13 @@
 'use client';
 
+import Link from 'next/link';
 import { useOfflineStatus } from '@/hooks/useOfflineStatus';
-import { WifiOff, RefreshCw } from 'lucide-react';
+import { WifiOff, RefreshCw, LogIn } from 'lucide-react';
 
 export default function OfflineBanner() {
-  const { isOnline, hasPendingSync } = useOfflineStatus();
+  const { isOnline, hasPendingSync, needsReauth } = useOfflineStatus();
 
-  if (isOnline && !hasPendingSync) {
+  if (isOnline && !hasPendingSync && !needsReauth) {
     return null;
   }
 
@@ -21,6 +22,18 @@ export default function OfflineBanner() {
           <>
             <WifiOff className="w-4 h-4" aria-hidden="true" />
             <span>You are offline. Some features may be unavailable.</span>
+          </>
+        ) : needsReauth ? (
+          <>
+            <LogIn className="w-4 h-4" aria-hidden="true" />
+            <span>
+              Some changes you made offline couldn&apos;t be sent because your session expired.
+              They&apos;re still saved on this device.{' '}
+              <Link href="/auth/login" className="underline">
+                Sign in again
+              </Link>{' '}
+              to resend them.
+            </span>
           </>
         ) : hasPendingSync ? (
           <>
