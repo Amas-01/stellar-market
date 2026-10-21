@@ -53,6 +53,7 @@ pub enum DisputeError {
     InsufficientActiveArbitrators = 27,
     EvidenceCapReached = 28,
     DuplicateEvidence = 29,
+    InvalidVoteChoice = 30,
 }
 
 #[contracttype]
@@ -1633,7 +1634,7 @@ impl DisputeContract {
                 ap.refund_split_sum = ap.refund_split_sum.saturating_add(pct as u64);
             }
             VoteChoice::MaliciousFiling | VoteChoice::SplitAward(_, _) => {
-                return Err(DisputeError::Unauthorized);
+                return Err(DisputeError::InvalidVoteChoice);
             }
         }
 
