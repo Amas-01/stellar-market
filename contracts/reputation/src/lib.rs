@@ -174,6 +174,11 @@ pub enum ReputationError {
     /// mistyped proposal id (issue #1434). Genuine authorization checks are
     /// unaffected and still return `NotAdmin`.
     ProposalNotFound = 31,
+    /// Rejected when `claim_stake` is asked to withdraw a non-positive amount, or
+    /// more than the reviewer's current `StakeBalance`. This used to reuse
+    /// `BelowMinStake`, which callers read as "raise your stake", not "fix the
+    /// claim amount" (issue #1548).
+    InvalidClaimAmount = 32,
 }
 
 #[contracttype]
@@ -269,12 +274,20 @@ pub enum ScoreBadge {
     Elite = 3,
 }
 
+/// Outcome of a dispute, passed by the dispute contract to `apply_dispute_outcome`.
+/// Each variant shifts the affected user's score by a fixed amount, given by
+/// `DISPUTE_OUTCOME_WON_SCORE`, `DISPUTE_OUTCOME_LOST_SCORE`, and
+/// `DISPUTE_OUTCOME_MALICIOUS_FILING_SCORE`.
 #[contracttype]
 #[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
 #[repr(u32)]
 pub enum DisputeOutcome {
+    /// The user won the dispute. Applies `DISPUTE_OUTCOME_WON_SCORE` (+50).
     Won = 0,
+    /// The user lost the dispute. Applies `DISPUTE_OUTCOME_LOST_SCORE` (-100).
     Lost = 1,
+    /// The user filed the dispute in bad faith. Applies
+    /// `DISPUTE_OUTCOME_MALICIOUS_FILING_SCORE` (-250).
     MaliciousFiling = 2,
 }
 
@@ -293,12 +306,21 @@ pub struct AwardedBadge {
     pub awarded_at: u64,
 }
 
+/// Lifecycle state of a [`ReviewAppeal`].
+///
+/// An appeal starts as `Pending` when `appeal_review` files it. An admin then
+/// moves it to `Dismissed` or `ReviewRemoved` via `admin_resolve_appeal`, and
+/// removing the review through the admin removal path also sets `ReviewRemoved`.
+/// Once resolved, an appeal cannot be resolved again.
 #[contracttype]
 #[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
 #[repr(u32)]
 pub enum AppealStatus {
+    /// Filed and awaiting an admin decision.
     Pending = 0,
+    /// The admin rejected the appeal, and the review stands.
     Dismissed = 1,
+    /// The review was removed, either by upholding the appeal or through the admin removal path.
     ReviewRemoved = 2,
 }
 
@@ -2062,6 +2084,11 @@ impl ReputationContract {
         env.storage().persistent().set(&list_key, &endorsers);
         bump_endorsement_ttl(&env, &target, &skill, &endorser);
 
+        env.events().publish(
+            (symbol_short!("reput"), symbol_short!("endorsed")),
+            (endorser, target, skill),
+        );
+
         Ok(())
     }
 
@@ -2290,7 +2317,7 @@ impl ReputationContract {
         let balance: i128 = env.storage().persistent().get(&balance_key).unwrap_or(0);
 
         if balance < amount || amount <= 0 {
-            return Err(ReputationError::BelowMinStake);
+            return Err(ReputationError::InvalidClaimAmount);
         }
 
         // Lockup enforcement: reject claims where the stake is younger than
