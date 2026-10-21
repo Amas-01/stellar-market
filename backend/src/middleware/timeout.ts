@@ -25,11 +25,8 @@ export function requestTimeoutMiddleware(
   }
 
   const startedAt = Date.now();
-  let timedOut = false;
 
   const timer = setTimeout(() => {
-    timedOut = true;
-
     logger.warn(
       {
         route: req.originalUrl,
@@ -50,12 +47,6 @@ export function requestTimeoutMiddleware(
 
   res.once("finish", () => clearTimeout(timer));
   res.once("close", () => clearTimeout(timer));
-
-  // Expose for downstream handlers that want to bail out early.
-  Object.defineProperty(req, "timedout", {
-    get: () => timedOut,
-    configurable: true,
-  });
 
   next();
 }
