@@ -145,7 +145,7 @@ router.post(
     const reportCount = await incrementReporterCount(reporterId);
 
     // ── 3. Determine if this report needs secondary review ─────────────────
-    const requiresReview = alreadySuspicious || reportCount > REPORT_WINDOW_LIMIT;
+    const requiresReview = alreadySuspicious || reportCount >= REPORT_WINDOW_LIMIT;
 
     // ── 4. Persist the report ──────────────────────────────────────────────
     const report = await prisma.report.create({
