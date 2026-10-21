@@ -35,9 +35,15 @@ pub enum Badge {
 /// reputation contract client and forwards each call cross-contract.
 pub trait ReputationVerifier {
     /// Returns the user's current reputation score.
+    ///
+    /// A user with no reputation history must return `0`, mirroring the reputation
+    /// contract's `get_gov_weight`, which gives unknown users zero weight.
     fn get_score(&self, env: &Env, user: Address) -> u32;
 
     /// Returns whether the user holds the given badge.
+    ///
+    /// A user with no reputation history holds no badges, so this must return
+    /// `false` for them rather than panicking.
     fn has_badge(&self, env: &Env, user: Address, badge: Badge) -> bool;
 }
 
