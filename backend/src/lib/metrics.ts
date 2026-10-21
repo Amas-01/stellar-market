@@ -13,15 +13,6 @@ const httpRequestDuration = new prometheus.Histogram({
   registers: [register],
 });
 
-const dbPoolSize = new prometheus.Gauge({
-  name: "db_pool_size",
-  help: "Size of the database connection pool",
-  registers: [register],
-});
-
-const poolSize = parseInt(process.env.DATABASE_POOL_SIZE || "10", 10);
-dbPoolSize.set(poolSize);
-
 export function requestDurationMiddleware(
   req: Request,
   res: Response,
@@ -35,7 +26,9 @@ export function requestDurationMiddleware(
   const end = httpRequestDuration.startTimer();
 
   res.on("finish", () => {
-    const route = (req.route?.path || req.path).replace(/\/api/, "");
+    const route = req.route?.path
+      ? req.route.path.replace(/\/api/, "")
+      : "unmatched";
     end({ method: req.method, route, status_code: res.statusCode });
   });
 

@@ -4,6 +4,7 @@ import {
   createContext,
   useCallback,
   useContext,
+  useMemo,
   useState,
   useEffect,
 } from "react";
@@ -40,13 +41,18 @@ export function ToastProvider({ children }: { children: React.ReactNode }) {
     setToasts((prev) => prev.filter((t) => t.id !== id));
   }, []);
 
-  const toast = {
-    success: (message: string) => addToast(message, "success"),
-    error: (message: string) => addToast(message, "error"),
-  };
+  const toast = useMemo(
+    () => ({
+      success: (message: string) => addToast(message, "success"),
+      error: (message: string) => addToast(message, "error"),
+    }),
+    [addToast]
+  );
+
+  const contextValue = useMemo(() => ({ toast }), [toast]);
 
   return (
-    <ToastContext.Provider value={{ toast }}>
+    <ToastContext.Provider value={contextValue}>
       {children}
       <div
         className="fixed bottom-4 right-4 z-[100] flex flex-col gap-2"

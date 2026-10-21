@@ -309,7 +309,7 @@ fn test_create_job_empty_milestones() {
 }
 
 #[test]
-#[should_panic(expected = "HostError: Error(Contract, #48)")] // TooManyMilestones
+#[should_panic(expected = "HostError: Error(Contract, #34)")] // TooManyMilestones
 fn test_create_job_too_many_milestones() {
     let env = Env::default();
     env.mock_all_auths();
@@ -477,6 +477,44 @@ fn test_extend_deadline() {
 
     let job = client.get_job(&job_id);
     assert_eq!(job.milestones.get(0).unwrap().deadline, 4000);
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #3)")] // InvalidStatus
+fn test_extend_deadline_fails_when_disputed() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().with_mut(|l| l.timestamp = 1000);
+
+    let contract_id = env.register_contract(None, EscrowContract);
+    let client = EscrowContractClient::new(&env, &contract_id);
+
+    let user = Address::generate(&env);
+    let freelancer = Address::generate(&env);
+    let token = Address::generate(&env);
+
+    let milestones = vec![&env, (String::from_str(&env, "Task 1"), 100_i128, 2000_u64)];
+
+    let job_id = client.create_job(
+        &user,
+        &freelancer,
+        &token,
+        &milestones,
+        &3000_u64,
+        &GRACE_PERIOD,
+        &DEFAULT_EXPIRY_LEDGER,
+    );
+
+    // Force the job into Disputed state
+    env.as_contract(&client.address, || {
+        let key = crate::DataKey::Job(job_id);
+        let mut job: crate::Job = env.storage().persistent().get(&key).unwrap();
+        job.status = JobStatus::Disputed;
+        env.storage().persistent().set(&key, &job);
+    });
+
+    // Must be rejected with InvalidStatus (#3)
+    client.extend_deadline(&job_id, &0, &4000_u64);
 }
 
 // ── Helpers for claim_refund tests ───────────────────────────────────────────
@@ -1343,7 +1381,7 @@ fn test_propose_revision_fails_when_pending_proposal_exists() {
 }
 
 #[test]
-#[should_panic(expected = "HostError: Error(Contract, #48)")] // TooManyMilestones
+#[should_panic(expected = "HostError: Error(Contract, #34)")] // TooManyMilestones
 fn test_propose_revision_too_many_milestones() {
     let env = Env::default();
     env.mock_all_auths();
@@ -2068,6 +2106,115 @@ fn test_resolve_dispute_callback_refund_both() {
     let token_client = TokenClient::new(&env, &token);
     assert_eq!(token_client.balance(&client), each);
     assert_eq!(token_client.balance(&freelancer), each);
+}
+
+// ── #1178 — Escalate leaves the job parked in Disputed ────────────────────────
+//
+// These lock the behaviour now documented on `JobStatus` under "Escalated
+// disputes": Escalate is a self-loop that moves no funds, and the job leaves
+// Disputed only via a later resolution or via expire_job.
+
+/// Helper: create + fund a single-milestone job and drive it into Disputed
+/// through the registered dispute contract. Returns (job_id, amount).
+fn setup_disputed_job(
+    env: &Env,
+    escrow: &EscrowContractClient<'_>,
+    client: &Address,
+    freelancer: &Address,
+    token: &Address,
+    admin: &Address,
+) -> (u64, i128) {
+    let amount: i128 = 1000;
+    let milestones = vec![
+        env,
+        (String::from_str(env, "Task 1"), amount, JOB_DEADLINE),
+    ];
+    let job_id = escrow.create_job(
+        client,
+        freelancer,
+        token,
+        &milestones,
+        &JOB_DEADLINE,
+        &GRACE_PERIOD,
+        &DEFAULT_EXPIRY_LEDGER,
+    );
+    escrow.fund_job(&job_id, client, &0, &0);
+
+    let dispute_contract = Address::generate(env);
+    escrow.set_dispute_contract(admin, &dispute_contract);
+    escrow.mark_job_disputed(&job_id, &1_u64);
+
+    (job_id, amount)
+}
+
+#[test]
+fn test_resolve_dispute_callback_escalate_keeps_job_disputed_and_funds_escrowed() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().with_mut(|l| l.timestamp = 1000);
+
+    let (escrow, client, freelancer, token, admin) = setup_test(&env);
+    let (job_id, amount) = setup_disputed_job(&env, &escrow, &client, &freelancer, &token, &admin);
+
+    let token_client = TokenClient::new(&env, &token);
+    let client_before = token_client.balance(&client);
+    let freelancer_before = token_client.balance(&freelancer);
+
+    escrow.resolve_dispute_callback(&job_id, &DisputeResolution::Escalate);
+
+    // Self-loop: status is untouched and the escrow still holds the full amount.
+    let job = escrow.get_job(&job_id);
+    assert_eq!(job.status, JobStatus::Disputed);
+    assert_eq!(token_client.balance(&escrow.address), amount);
+    assert_eq!(token_client.balance(&client), client_before);
+    assert_eq!(token_client.balance(&freelancer), freelancer_before);
+}
+
+#[test]
+fn test_escalated_job_can_be_resolved_by_a_later_callback() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().with_mut(|l| l.timestamp = 1000);
+
+    let (escrow, client, freelancer, token, admin) = setup_test(&env);
+    let (job_id, amount) = setup_disputed_job(&env, &escrow, &client, &freelancer, &token, &admin);
+
+    // Escalate twice — re-callable, still no settlement.
+    escrow.resolve_dispute_callback(&job_id, &DisputeResolution::Escalate);
+    escrow.resolve_dispute_callback(&job_id, &DisputeResolution::Escalate);
+    assert_eq!(escrow.get_job(&job_id).status, JobStatus::Disputed);
+
+    // The higher tier finally rules: the job settles with the escrow intact.
+    escrow.resolve_dispute_callback(&job_id, &DisputeResolution::FreelancerWins);
+
+    let job = escrow.get_job(&job_id);
+    assert_eq!(job.status, JobStatus::Completed);
+
+    let token_client = TokenClient::new(&env, &token);
+    assert_eq!(token_client.balance(&freelancer), amount);
+}
+
+#[test]
+fn test_escalated_job_can_still_expire_after_deadline() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().with_mut(|l| l.timestamp = 1000);
+
+    let (escrow, client, freelancer, token, admin) = setup_test(&env);
+    let (job_id, amount) = setup_disputed_job(&env, &escrow, &client, &freelancer, &token, &admin);
+
+    let token_client = TokenClient::new(&env, &token);
+    let client_before = token_client.balance(&client);
+
+    escrow.resolve_dispute_callback(&job_id, &DisputeResolution::Escalate);
+
+    // Backstop path: nobody re-resolves, the deadline passes, anyone can expire it.
+    env.ledger().with_mut(|l| l.timestamp = JOB_DEADLINE + 1);
+    escrow.expire_job(&job_id);
+
+    let job = escrow.get_job(&job_id);
+    assert_eq!(job.status, JobStatus::Expired);
+    assert_eq!(token_client.balance(&client), client_before + amount);
 }
 
 // ── Pause mechanism tests ─────────────────────────────────────────────────────
@@ -3451,6 +3598,36 @@ fn test_multisig_pause_flow() {
 }
 
 #[test]
+fn test_get_multisig_proposal_reads_pending_archived_and_unknown_ids() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().with_mut(|l| l.timestamp = 1000);
+
+    let (contract, _, _, _, signer1, _) = setup_multisig(&env);
+    let proposal_id = contract.propose_admin_action(
+        &signer1,
+        &AdminAction::AddSigner(Address::generate(&env)),
+    );
+
+    let pending = contract
+        .get_multisig_proposal(&proposal_id)
+        .expect("Pending proposal should be returned");
+    assert_eq!(pending.id, proposal_id);
+    assert!(!pending.executed);
+
+    env.ledger()
+        .with_mut(|l| l.timestamp += PROPOSAL_TTL + 1);
+    contract.prune_expired_proposal(&proposal_id);
+
+    let archived = contract
+        .get_multisig_proposal(&proposal_id)
+        .expect("Archived proposal should be returned");
+    assert_eq!(archived.id, proposal_id);
+    assert!(!archived.executed);
+    assert!(contract.get_multisig_proposal(&999).is_none());
+}
+
+#[test]
 fn test_multisig_unauthorized_proposal() {
     let env = Env::default();
     env.mock_all_auths();
@@ -3563,10 +3740,12 @@ fn test_release_partial_then_full_remainder() {
 
     contract.fund_job(&job_id, &client_addr, &0, &0);
     contract.submit_milestone(&job_id, &0, &freelancer);
+    assert_eq!(contract.get_milestone_disbursed(&job_id, &0), 0);
 
     // First partial payment
     contract.release_partial_payment(&job_id, &0, &partial, &client_addr, &0);
     assert_eq!(token.balance(&freelancer), partial);
+    assert_eq!(contract.get_milestone_disbursed(&job_id, &0), partial);
 
     // Second partial payment clears the rest
     let remaining = amount - partial;
@@ -3576,6 +3755,7 @@ fn test_release_partial_then_full_remainder() {
     assert_eq!(job.milestones.get(0).unwrap().status, MilestoneStatus::Approved);
     assert_eq!(job.status, JobStatus::InProgress);
     assert_eq!(token.balance(&freelancer), amount);
+    assert_eq!(contract.get_milestone_disbursed(&job_id, &0), amount);
 }
 
 #[test]
@@ -4926,6 +5106,7 @@ fn test_partial_refund_balance_tracked_accurately() {
 }
 
 #[test]
+#[should_panic(expected = "Error(Contract, #5)")] // InsufficientFunds
 fn test_partial_refund_fails_over_refund() {
     let env = Env::default();
     env.mock_all_auths();
@@ -4951,8 +5132,36 @@ fn test_partial_refund_fails_over_refund() {
     contract.fund_job(&job_id, &client_addr, &0, &0);
 
     // No milestones approved, remaining = 500. Attempt to refund 600 > 500 → should fail.
-    let result = contract.try_partial_refund(&admin, &job_id, &600, &0);
-    assert!(result.is_err());
+    contract.partial_refund(&admin, &job_id, &600, &0);
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #24)")] // InvalidAmount
+fn test_partial_refund_fails_non_positive_amount() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().with_mut(|l| l.timestamp = 1000);
+
+    let (contract, client_addr, freelancer, token, admin) = setup_test(&env);
+
+    let milestones = vec![
+        &env,
+        (String::from_str(&env, "M1"), 500_i128, JOB_DEADLINE),
+    ];
+
+    let job_id = contract.create_job(
+        &client_addr,
+        &freelancer,
+        &token,
+        &milestones,
+        &JOB_DEADLINE,
+        &GRACE_PERIOD,
+        &DEFAULT_EXPIRY_LEDGER,
+    );
+
+    contract.fund_job(&job_id, &client_addr, &0, &0);
+
+    contract.partial_refund(&admin, &job_id, &0, &0);
 }
 
 #[test]
@@ -7566,4 +7775,1142 @@ fn test_partial_payment_blocked_by_active_sub_assignment() {
         &1_u64,
     );
     assert!(result.is_err());
+}
+
+// ============================================================
+// EmergencyWithdraw — deferred vs immediate payment model tests
+// Issue #1118: approved-but-unpaid milestone funds must not be
+// permanently stranded by an emergency withdrawal.
+// ============================================================
+
+/// Helper: create a 2-milestone job with a 500-unit mint, fund it, and return
+/// `(escrow_client, client_addr, freelancer, token_addr, admin, job_id)`.
+fn setup_emergency_withdraw_job(
+    env: &Env,
+) -> (EscrowContractClient<'_>, Address, Address, Address, Address, u64) {
+    let contract_id = env.register_contract(None, EscrowContract);
+    let escrow = EscrowContractClient::new(env, &contract_id);
+
+    let client_addr = Address::generate(env);
+    let freelancer = Address::generate(env);
+    let admin = Address::generate(env);
+
+    let token_address = env
+        .register_stellar_asset_contract_v2(admin.clone())
+        .address();
+    let token_admin = StellarAssetClient::new(env, &token_address);
+    // Mint enough for the job plus some spare to detect double-payment.
+    token_admin.mint(&client_addr, &1000);
+
+    let treasury = Address::generate(env);
+    let signers = vec![env, admin.clone()];
+    escrow.initialize(&signers, &1, &treasury, &0, &604_800);
+
+    // Two milestones: 200 and 300 (total 500).
+    // Milestone tuples are (description, amount, deadline) — no token field.
+    // Deadlines must be strictly ascending and before job_deadline.
+    let job_id = escrow.create_job(
+        &client_addr,
+        &freelancer,
+        &token_address,
+        &vec![
+            env,
+            (String::from_str(env, "milestone-0"), 200_i128, JOB_DEADLINE / 2),
+            (String::from_str(env, "milestone-1"), 300_i128, JOB_DEADLINE),
+        ],
+        &JOB_DEADLINE,
+        &GRACE_PERIOD,
+        &DEFAULT_EXPIRY_LEDGER,
+    );
+    // fund_job(job_id, client, agreed_value_stroops=0 skip oracle, max_slippage_bps=0)
+    escrow.fund_job(&job_id, &client_addr, &0_i128, &0_u32);
+
+    (escrow, client_addr, freelancer, token_address, admin, job_id)
+}
+
+/// Helper: pause the contract via a single-signer, no-timelock setup.
+/// Returns the temp signer used so callers can reuse it for further actions.
+fn pause_for_emergency(
+    env: &Env,
+    escrow: &EscrowContractClient<'_>,
+    admin: &Address,
+) -> Address {
+    let temp_signer = Address::generate(env);
+    escrow.propose_admin_action(admin, &AdminAction::AddSigner(temp_signer.clone()));
+    let proposal_id = escrow.propose_admin_action(admin, &AdminAction::Pause);
+    env.ledger().with_mut(|l| l.timestamp += 48 * 60 * 60 + 1);
+    escrow.approve_admin_action(&temp_signer, &proposal_id);
+    temp_signer
+}
+
+/// Helper: propose and auto-execute an EmergencyWithdraw against `job_id`,
+/// sending the withdrawable escrow to `recipient`.
+fn do_emergency_withdraw(
+    env: &Env,
+    escrow: &EscrowContractClient<'_>,
+    admin: &Address,
+    job_id: u64,
+    recipient: &Address,
+) {
+    escrow.propose_admin_action(
+        admin,
+        &AdminAction::EmergencyWithdraw(job_id, recipient.clone()),
+    );
+}
+
+// -----------------------------------------------------------------
+// Test 1: deferred-payment model — approved-but-unpaid milestone
+// funds are paid to the freelancer; remainder goes to admin recipient.
+// -----------------------------------------------------------------
+#[test]
+fn test_emergency_withdraw_deferred_model_pays_freelancer() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().with_mut(|l| l.timestamp = 1000);
+
+    let (escrow, client_addr, freelancer, token_addr, admin, job_id) =
+        setup_emergency_withdraw_job(&env);
+
+    let token = TokenClient::new(&env, &token_addr);
+
+    // Deferred model: submit milestone 0, approve it (no funds move yet).
+    escrow.submit_milestone(&job_id, &0_u32, &freelancer);
+    escrow.approve_milestone(&job_id, &0_u32, &client_addr);
+
+    // Milestone 1 is still Pending (not submitted). Total escrowed: 500.
+    // After approve_milestone(0): milestone 0 is Approved but unpaid.
+    // Expected: emergency withdraw pays 200 to freelancer, 300 to recipient.
+
+    let recipient = Address::generate(&env);
+
+    // Record balances before.
+    let freelancer_before = token.balance(&freelancer);
+    let recipient_before = token.balance(&recipient);
+
+    pause_for_emergency(&env, &escrow, &admin);
+    do_emergency_withdraw(&env, &escrow, &admin, job_id, &recipient);
+
+    let freelancer_after = token.balance(&freelancer);
+    let recipient_after = token.balance(&recipient);
+
+    // Freelancer must have received the deferred approved milestone (200).
+    assert_eq!(
+        freelancer_after - freelancer_before,
+        200,
+        "freelancer should receive the deferred approved milestone amount"
+    );
+    // Recipient (admin) gets the remaining unapproved balance (300).
+    assert_eq!(
+        recipient_after - recipient_before,
+        300,
+        "admin recipient should receive only the unapproved escrow balance"
+    );
+}
+
+// -----------------------------------------------------------------
+// Test 2: immediate-payment model — release_milestone pays before
+// the emergency; EmergencyWithdraw must not re-pay an already-paid
+// milestone (no double-payment regression).
+// -----------------------------------------------------------------
+#[test]
+fn test_emergency_withdraw_immediate_model_no_double_payment() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().with_mut(|l| l.timestamp = 1000);
+
+    let (escrow, client_addr, freelancer, token_addr, admin, job_id) =
+        setup_emergency_withdraw_job(&env);
+
+    let token = TokenClient::new(&env, &token_addr);
+
+    // Immediate model: submit + release_milestone for milestone 0 (pays freelancer 200 now).
+    escrow.submit_milestone(&job_id, &0_u32, &freelancer);
+    escrow.release_milestone(&job_id, &0_u32, &client_addr, &0_i128, &1_u64);
+
+    // Milestone 0 is now Approved AND already paid.
+    // Milestone 1 is still Pending. Remaining escrow: 300.
+    // Emergency withdraw should give 300 to recipient; freelancer gets nothing more.
+
+    let recipient = Address::generate(&env);
+
+    let freelancer_before = token.balance(&freelancer);
+    let recipient_before = token.balance(&recipient);
+
+    pause_for_emergency(&env, &escrow, &admin);
+    do_emergency_withdraw(&env, &escrow, &admin, job_id, &recipient);
+
+    let freelancer_after = token.balance(&freelancer);
+    let recipient_after = token.balance(&recipient);
+
+    // Freelancer must NOT receive any additional payment (already received 200 via release_milestone).
+    assert_eq!(
+        freelancer_after - freelancer_before,
+        0,
+        "freelancer must not be double-paid for already-released milestone"
+    );
+    // Admin recipient gets the remaining unapproved balance (300).
+    assert_eq!(
+        recipient_after - recipient_before,
+        300,
+        "admin recipient should receive the remaining unapproved escrow balance"
+    );
+}
+
+// -----------------------------------------------------------------
+// Test 3: mixed job — milestone 0 deferred-approved (via approve_milestone,
+// no funds moved), milestone 1 still Pending. Emergency withdraw must:
+//   - pay freelancer for deferred milestone 0 (200)
+//   - send remaining unapproved escrow balance (300) to admin recipient
+// -----------------------------------------------------------------
+#[test]
+fn test_emergency_withdraw_mixed_deferred_and_immediate() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().with_mut(|l| l.timestamp = 1000);
+
+    let (escrow, client_addr, freelancer, token_addr, admin, job_id) =
+        setup_emergency_withdraw_job(&env);
+
+    let token = TokenClient::new(&env, &token_addr);
+
+    // Milestone 0 — deferred: submit then approve (no payout yet, funds still in escrow).
+    escrow.submit_milestone(&job_id, &0_u32, &freelancer);
+    escrow.approve_milestone(&job_id, &0_u32, &client_addr);
+
+    // Milestone 1 — still Pending; no submission, no release.
+    // State:
+    //   milestone 0: Approved, disbursed = 0  (deferred, 200 still in escrow)
+    //   milestone 1: Pending                  (300 in escrow, unapproved)
+    //   Job status: InProgress
+    // Expected: freelancer receives 200 (deferred); admin recipient receives 300.
+
+    let recipient = Address::generate(&env);
+
+    let freelancer_before = token.balance(&freelancer);
+    let recipient_before = token.balance(&recipient);
+
+    pause_for_emergency(&env, &escrow, &admin);
+    do_emergency_withdraw(&env, &escrow, &admin, job_id, &recipient);
+
+    let freelancer_after = token.balance(&freelancer);
+    let recipient_after = token.balance(&recipient);
+
+    assert_eq!(
+        freelancer_after - freelancer_before,
+        200,
+        "freelancer should receive the 200 from the deferred approved milestone"
+    );
+    assert_eq!(
+        recipient_after - recipient_before,
+        300,
+        "admin recipient should receive the 300 unapproved escrow balance"
+    );
+}
+
+// -----------------------------------------------------------------
+// Test 4: no milestones approved — all escrow goes to admin recipient.
+// (Sanity / regression: existing behaviour unchanged for the no-approval case.)
+// -----------------------------------------------------------------
+#[test]
+fn test_emergency_withdraw_no_approvals_all_goes_to_recipient() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().with_mut(|l| l.timestamp = 1000);
+
+    let (escrow, client_addr, _freelancer, token_addr, admin, job_id) =
+        setup_emergency_withdraw_job(&env);
+
+    let token = TokenClient::new(&env, &token_addr);
+
+    // No milestones submitted or approved — full escrow 500 goes to recipient.
+    let recipient = Address::generate(&env);
+    let recipient_before = token.balance(&recipient);
+
+    pause_for_emergency(&env, &escrow, &admin);
+    do_emergency_withdraw(&env, &escrow, &admin, job_id, &recipient);
+
+    let recipient_after = token.balance(&recipient);
+
+    assert_eq!(
+        recipient_after - recipient_before,
+        500,
+        "all escrowed funds go to admin recipient when no milestones are approved"
+    );
+}
+
+// -----------------------------------------------------------------
+// Test 5: all milestones deferred-approved — full escrow goes to
+// freelancer; admin recipient receives nothing.
+// -----------------------------------------------------------------
+#[test]
+fn test_emergency_withdraw_all_deferred_approved_all_to_freelancer() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().with_mut(|l| l.timestamp = 1000);
+
+    let (escrow, client_addr, freelancer, token_addr, admin, job_id) =
+        setup_emergency_withdraw_job(&env);
+
+    let token = TokenClient::new(&env, &token_addr);
+
+    // Deferred-approve both milestones (total 500 still in escrow).
+    escrow.submit_milestone(&job_id, &0_u32, &freelancer);
+    escrow.approve_milestone(&job_id, &0_u32, &client_addr);
+    escrow.submit_milestone(&job_id, &1_u32, &freelancer);
+    escrow.approve_milestone(&job_id, &1_u32, &client_addr);
+
+    let recipient = Address::generate(&env);
+    let freelancer_before = token.balance(&freelancer);
+    let recipient_before = token.balance(&recipient);
+
+    pause_for_emergency(&env, &escrow, &admin);
+    do_emergency_withdraw(&env, &escrow, &admin, job_id, &recipient);
+
+    let freelancer_after = token.balance(&freelancer);
+    let recipient_after = token.balance(&recipient);
+
+    assert_eq!(
+        freelancer_after - freelancer_before,
+        500,
+        "all escrowed funds go to freelancer when all milestones are deferred-approved"
+    );
+    assert_eq!(
+        recipient_after - recipient_before,
+        0,
+        "admin recipient receives nothing when all funds are owed to freelancer"
+    );
+}
+
+// -----------------------------------------------------------------
+// Test 6 (regression): inactivity auto-approval — milestone paid via
+// finalize_inactivity_approval, then EmergencyWithdraw is called.
+// Because finalize_inactivity_approval now records MilestoneDisbursed,
+// EmergencyWithdraw must treat the milestone as the immediate-payment
+// model and must NOT pay the freelancer a second time.
+//
+// Setup: 2-milestone job (200 + 300 = 500 total).
+//   - Milestone 0 submitted at t=0; inactivity threshold elapsed (7 days);
+//     trigger_inactivity_approval called; grace period elapsed (3 days);
+//     finalize_inactivity_approval called → freelancer receives 200.
+//   - Milestone 1 still Pending.
+//   - Contract paused → EmergencyWithdraw.
+// Expected: freelancer gets 0 extra (already received 200), recipient gets 300.
+// -----------------------------------------------------------------
+#[test]
+fn test_inactivity_timestamp_getters_follow_storage_lifecycle() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().with_mut(|l| l.timestamp = 1000);
+
+    let (escrow, client_addr, freelancer, _token_addr, _admin, job_id) =
+        setup_emergency_withdraw_job(&env);
+
+    assert_eq!(escrow.get_milestone_submitted_at(&job_id, &0), None);
+    assert_eq!(escrow.get_inactivity_auto_approve_at(&job_id, &0), None);
+
+    escrow.submit_milestone(&job_id, &0, &freelancer);
+    assert_eq!(escrow.get_milestone_submitted_at(&job_id, &0), Some(1000));
+    assert_eq!(escrow.get_inactivity_auto_approve_at(&job_id, &0), None);
+
+    let trigger_time = 1000 + INACTIVITY_THRESHOLD_SECS + 1;
+    env.ledger().with_mut(|l| l.timestamp = trigger_time);
+    let auto_approve_at = trigger_time + INACTIVITY_GRACE_SECS;
+    escrow.trigger_inactivity_extension(&job_id, &0, &freelancer);
+
+    assert_eq!(
+        escrow.get_milestone_submitted_at(&job_id, &0),
+        Some(1000)
+    );
+    assert_eq!(
+        escrow.get_inactivity_auto_approve_at(&job_id, &0),
+        Some(auto_approve_at)
+    );
+
+    escrow.approve_milestone(&job_id, &0, &client_addr);
+    assert_eq!(escrow.get_milestone_submitted_at(&job_id, &0), None);
+    assert_eq!(escrow.get_inactivity_auto_approve_at(&job_id, &0), None);
+}
+
+#[test]
+fn test_emergency_withdraw_no_double_pay_after_inactivity_approval() {
+    let env = Env::default();
+    env.mock_all_auths();
+    // Start at t=1000 so timestamps are above zero.
+    env.ledger().with_mut(|l| l.timestamp = 1000);
+
+    let (escrow, _client_addr, freelancer, token_addr, admin, job_id) =
+        setup_emergency_withdraw_job(&env);
+
+    let token = TokenClient::new(&env, &token_addr);
+
+    // Submit milestone 0 at t=1000.
+    escrow.submit_milestone(&job_id, &0_u32, &freelancer);
+
+    // Advance past the 7-day inactivity threshold so trigger is allowed.
+    // INACTIVITY_THRESHOLD_SECS = 7 * 24 * 3600 = 604_800.
+    env.ledger().with_mut(|l| l.timestamp = 1000 + 604_800 + 1);
+
+    // Trigger inactivity (either client or freelancer can call this).
+    escrow.trigger_inactivity_extension(&job_id, &0_u32, &freelancer);
+
+    // Advance past the 3-day grace period so finalise is allowed.
+    // INACTIVITY_GRACE_SECS = 3 * 24 * 3600 = 259_200.
+    env.ledger().with_mut(|l| l.timestamp += 259_200 + 1);
+
+    // Finalise: funds leave escrow → freelancer receives 200.
+    let freelancer_before = token.balance(&freelancer);
+    escrow.finalize_inactivity_approval(&job_id, &0_u32, &freelancer);
+    let freelancer_after_finalize = token.balance(&freelancer);
+
+    assert_eq!(
+        freelancer_after_finalize - freelancer_before,
+        200,
+        "freelancer should receive 200 from finalize_inactivity_approval"
+    );
+
+    // Now pause the contract and run EmergencyWithdraw.
+    // Milestone 0 is Approved with MilestoneDisbursed == 200 (immediate model).
+    // Milestone 1 is Pending (300 still in escrow).
+    // EmergencyWithdraw should give 300 to recipient and 0 extra to freelancer.
+    let recipient = Address::generate(&env);
+    let freelancer_before_withdraw = token.balance(&freelancer);
+    let recipient_before = token.balance(&recipient);
+
+    pause_for_emergency(&env, &escrow, &admin);
+    do_emergency_withdraw(&env, &escrow, &admin, job_id, &recipient);
+
+    let freelancer_after_withdraw = token.balance(&freelancer);
+    let recipient_after = token.balance(&recipient);
+
+    assert_eq!(
+        freelancer_after_withdraw - freelancer_before_withdraw,
+        0,
+        "freelancer must not be double-paid: inactivity-approved milestone already disbursed"
+    );
+    assert_eq!(
+        recipient_after - recipient_before,
+        300,
+        "admin recipient should receive the remaining unapproved escrow balance"
+    );
+}
+
+// ============================================================
+// Revision + sub-assignment cross-feature reconciliation tests
+// Issue: accept_revision never reconciled active SubAssignment
+// entries, enabling orphaned payouts and disproportionate splits.
+// ============================================================
+
+/// Proposing a revision that drops a milestone id with an active sub-assignment
+/// must be rejected at propose time, preventing silent orphaning.
+#[test]
+#[should_panic(expected = "Error(Contract, #3)")]
+fn test_propose_revision_rejected_if_drops_milestone_with_active_sub_assign() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().with_mut(|l| l.timestamp = 1000);
+
+    let (escrow, client_addr, freelancer, _token, _treasury, job_id) =
+        setup_sub_assign_job(&env);
+
+    let sub_freelancer = Address::generate(&env);
+    escrow.sub_assign_milestone(&job_id, &0_u32, &freelancer, &sub_freelancer, &300_i128);
+
+    // Propose a revision that replaces milestone id=0 with a new id=1 (dropping id=0).
+    // The active sub-assignment on id=0 would be permanently orphaned.
+    let new_milestones = vec![
+        &env,
+        Milestone {
+            id: 1,
+            description: String::from_str(&env, "Renumbered"),
+            amount: 1_000_i128,
+            status: MilestoneStatus::Pending,
+            deadline: JOB_DEADLINE,
+            token: None,
+        },
+    ];
+    escrow.propose_revision(&client_addr, &job_id, &new_milestones);
+}
+
+/// If a sub-assignment is created between propose_revision and accept_revision,
+/// the accept call must still block the orphan (safety-net at accept time).
+#[test]
+#[should_panic(expected = "Error(Contract, #3)")]
+fn test_accept_revision_rejected_if_sub_assign_created_after_propose() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().with_mut(|l| l.timestamp = 1000);
+
+    let (escrow, client_addr, freelancer, _token, _treasury, job_id) =
+        setup_sub_assign_job(&env);
+
+    // Propose dropping id=0 before any sub-assignment exists — propose_revision passes.
+    let new_milestones = vec![
+        &env,
+        Milestone {
+            id: 1,
+            description: String::from_str(&env, "Renumbered"),
+            amount: 1_000_i128,
+            status: MilestoneStatus::Pending,
+            deadline: JOB_DEADLINE,
+            token: None,
+        },
+    ];
+    escrow.propose_revision(&client_addr, &job_id, &new_milestones);
+
+    // Sub-assignment created in the propose→accept window.
+    let sub_freelancer = Address::generate(&env);
+    escrow.sub_assign_milestone(&job_id, &0_u32, &freelancer, &sub_freelancer, &300_i128);
+
+    // Accept must be rejected: accepting now would orphan the sub-assignment.
+    escrow.accept_revision(&freelancer, &job_id);
+}
+
+/// Accepting a revision that shrinks a milestone's amount must proportionally
+/// scale any active sub-assignment amount so neither party ends up with zero.
+#[test]
+fn test_accept_revision_scales_sub_assign_on_milestone_shrink() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().with_mut(|l| l.timestamp = 1000);
+
+    let (escrow, client_addr, freelancer, token, _treasury, job_id) =
+        setup_sub_assign_job(&env);
+
+    // Sub-assign 600 of the 1_000-unit milestone to a sub-freelancer.
+    let sub_freelancer = Address::generate(&env);
+    escrow.sub_assign_milestone(&job_id, &0_u32, &freelancer, &sub_freelancer, &600_i128);
+
+    // Client proposes shrinking the milestone from 1_000 to 400 (same id=0).
+    let new_milestones = vec![
+        &env,
+        Milestone {
+            id: 0,
+            description: String::from_str(&env, "Shrunk"),
+            amount: 400_i128,
+            status: MilestoneStatus::Pending,
+            deadline: JOB_DEADLINE,
+            token: None,
+        },
+    ];
+    escrow.propose_revision(&client_addr, &job_id, &new_milestones);
+
+    // Freelancer accepts. The sub-amount must be scaled: 600 * 400 / 1_000 = 240.
+    escrow.accept_revision(&freelancer, &job_id);
+
+    let sub = escrow.get_sub_assignment(&job_id, &0_u32).unwrap();
+    assert_eq!(sub.amount, 240, "sub-amount should be proportionally scaled");
+    assert_eq!(sub.status, SubAssignmentStatus::Active);
+
+    // Verify payout uses the new scaled sub-amount: sub gets 240, main freelancer gets 160.
+    escrow.submit_milestone(&job_id, &0_u32, &freelancer);
+    escrow.approve_milestone(&job_id, &0_u32, &client_addr);
+
+    let tc = TokenClient::new(&env, &token);
+    let fl_before = tc.balance(&freelancer);
+    let sub_before = tc.balance(&sub_freelancer);
+
+    escrow.complete_job(&job_id, &client_addr);
+
+    assert_eq!(tc.balance(&sub_freelancer) - sub_before, 240);
+    assert_eq!(tc.balance(&freelancer) - fl_before, 400 - 240);
+}
+
+/// Accepting a revision that *grows* a milestone's amount must leave any active
+/// sub-assignment's absolute amount unchanged (the main freelancer's share increases).
+/// Freelancer proposes the increase so that the client (the payer) is the acceptor —
+/// matching accept_revision's pattern where the top-up transfer is from job.client.
+#[test]
+fn test_accept_revision_sub_assign_unchanged_on_milestone_growth() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().with_mut(|l| l.timestamp = 1000);
+
+    let (escrow, client_addr, freelancer, token, _treasury, job_id) =
+        setup_sub_assign_job(&env);
+
+    // Sub-assign 400 of the 1_000-unit milestone.
+    let sub_freelancer = Address::generate(&env);
+    escrow.sub_assign_milestone(&job_id, &0_u32, &freelancer, &sub_freelancer, &400_i128);
+
+    // Freelancer proposes raising milestone from 1_000 to 2_000 (same id=0).
+    // Client accepts, which also authorizes the required top-up transfer from client.
+    let new_milestones = vec![
+        &env,
+        Milestone {
+            id: 0,
+            description: String::from_str(&env, "Expanded"),
+            amount: 2_000_i128,
+            status: MilestoneStatus::Pending,
+            deadline: JOB_DEADLINE,
+            token: None,
+        },
+    ];
+    escrow.propose_revision(&freelancer, &job_id, &new_milestones);
+    escrow.accept_revision(&client_addr, &job_id);
+
+    // Sub-amount should be unchanged at 400; only the main freelancer's share grew.
+    let sub = escrow.get_sub_assignment(&job_id, &0_u32).unwrap();
+    assert_eq!(sub.amount, 400, "sub-amount must not change when milestone grows");
+    assert_eq!(sub.status, SubAssignmentStatus::Active);
+
+    // Verify payout: sub gets 400, main freelancer gets 2_000 - 400 = 1_600.
+    escrow.submit_milestone(&job_id, &0_u32, &freelancer);
+    escrow.approve_milestone(&job_id, &0_u32, &client_addr);
+
+    let tc = TokenClient::new(&env, &token);
+    let fl_before = tc.balance(&freelancer);
+    let sub_before = tc.balance(&sub_freelancer);
+
+    escrow.complete_job(&job_id, &client_addr);
+
+    assert_eq!(tc.balance(&sub_freelancer) - sub_before, 400);
+    assert_eq!(tc.balance(&freelancer) - fl_before, 2_000 - 400);
+}
+
+// ─── #1156: get_price_oracle coverage ─────────────────────────────────────────
+
+#[test]
+fn test_get_price_oracle_unset_returns_none() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (contract, _client, _freelancer, _token, _admin) = setup_test(&env);
+
+    // Fresh contract — no oracle configured yet
+    assert!(contract.get_price_oracle().is_none());
+}
+
+#[test]
+fn test_get_price_oracle_returns_set_address() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (contract, _client, _freelancer, _token, admin) = setup_test(&env);
+
+    let oracle = Address::generate(&env);
+    contract.set_price_oracle(&admin, &oracle);
+
+    assert_eq!(contract.get_price_oracle(), Some(oracle));
+}
+
+#[test]
+fn test_set_price_oracle_overwrites_previous_value() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (contract, _client, _freelancer, _token, admin) = setup_test(&env);
+
+    let oracle_first = Address::generate(&env);
+    let oracle_second = Address::generate(&env);
+
+    contract.set_price_oracle(&admin, &oracle_first);
+    assert_eq!(contract.get_price_oracle(), Some(oracle_first));
+
+    contract.set_price_oracle(&admin, &oracle_second);
+    assert_eq!(contract.get_price_oracle(), Some(oracle_second));
+}
+
+// ============================================================
+// Multi-sig proposal storage lifecycle, validation and TTL bumps
+// Issues #1153, #1154, #1155, #1158
+// ============================================================
+
+use soroban_sdk::testutils::storage::{
+    Instance as _InstanceTestUtils, Persistent as _PersistentTestUtils,
+};
+
+/// Seconds after which a pending multi-sig proposal is no longer actionable.
+/// Mirrors `crate::PROPOSAL_TTL` (7 days), which is private to the contract.
+const MULTISIG_PROPOSAL_TTL: u64 = 7 * 24 * 60 * 60;
+const MULTISIG_TIME_LOCK: u64 = 48 * 60 * 60;
+
+fn instance_has_proposal(
+    env: &Env,
+    contract: &EscrowContractClient<'_>,
+    proposal_id: u64,
+) -> bool {
+    env.as_contract(&contract.address, || {
+        env.storage()
+            .instance()
+            .has(&crate::DataKey::MultiSigProposal(proposal_id))
+    })
+}
+
+fn archived_proposal(
+    env: &Env,
+    contract: &EscrowContractClient<'_>,
+    proposal_id: u64,
+) -> Option<crate::MultiSigProposal> {
+    env.as_contract(&contract.address, || {
+        env.storage()
+            .persistent()
+            .get(&crate::DataKey::MultiSigProposal(proposal_id))
+    })
+}
+
+fn instance_entry_count(env: &Env, contract: &EscrowContractClient<'_>) -> u32 {
+    env.as_contract(&contract.address, || env.storage().instance().all().len())
+}
+
+/// The contract exposes no signer/fee getters, so tests read the values the
+/// same way the rest of this suite reads contract state — straight from storage.
+fn current_signers(env: &Env, contract: &EscrowContractClient<'_>) -> Vec<Address> {
+    env.as_contract(&contract.address, || {
+        env.storage()
+            .instance()
+            .get(&crate::DataKey::MultiSigSigners)
+            .unwrap()
+    })
+}
+
+fn current_fee_bps(env: &Env, contract: &EscrowContractClient<'_>) -> u32 {
+    env.as_contract(&contract.address, || {
+        env.storage()
+            .instance()
+            .get(&soroban_sdk::symbol_short!("FEE"))
+            .unwrap()
+    })
+}
+
+// ── Issue #1153: proposals must not accumulate in instance storage ───────────
+
+#[test]
+fn test_executed_proposal_is_moved_out_of_instance_storage() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().with_mut(|l| l.timestamp = 1000);
+
+    let (contract, _, _, _, admin) = setup_test(&env);
+
+    // Threshold is 1 and Unpause carries no time lock, so this auto-executes.
+    let proposal_id = contract.propose_admin_action(&admin, &AdminAction::Unpause);
+
+    assert!(
+        !instance_has_proposal(&env, &contract, proposal_id),
+        "executed proposal must not stay in instance storage"
+    );
+
+    let archived = archived_proposal(&env, &contract, proposal_id)
+        .expect("executed proposal should be archived to persistent storage");
+    assert!(archived.executed, "archived record should be marked executed");
+    assert_eq!(archived.id, proposal_id);
+}
+
+#[test]
+fn test_execution_not_before_key_is_cleared_on_execution() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().with_mut(|l| l.timestamp = 1000);
+
+    let (contract, _, _, _, admin) = setup_test(&env);
+
+    // Pause is time-locked, so `MultiSigExecutionNotBefore` is written on propose.
+    let proposal_id = contract.propose_admin_action(&admin, &AdminAction::Pause);
+    assert!(env.as_contract(&contract.address, || {
+        env.storage()
+            .instance()
+            .has(&crate::DataKey::MultiSigExecutionNotBefore(proposal_id))
+    }));
+
+    env.ledger().with_mut(|l| l.timestamp += MULTISIG_TIME_LOCK + 1);
+    contract.execute_proposal(&admin, &proposal_id);
+
+    assert!(
+        env.as_contract(&contract.address, || {
+            !env.storage()
+                .instance()
+                .has(&crate::DataKey::MultiSigExecutionNotBefore(proposal_id))
+        }),
+        "time-lock key must be dropped once the proposal is terminal"
+    );
+}
+
+#[test]
+fn test_instance_storage_does_not_grow_over_many_propose_execute_cycles() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().with_mut(|l| l.timestamp = 1000);
+
+    let (contract, _, _, _, admin) = setup_test(&env);
+
+    // First cycle establishes the steady state: it is the call that first writes
+    // `MultiSigProposalCount` and `Paused`. Every later cycle must reuse them.
+    contract.propose_admin_action(&admin, &AdminAction::Unpause);
+    let baseline = instance_entry_count(&env, &contract);
+
+    for _ in 0..50 {
+        let id = contract.propose_admin_action(&admin, &AdminAction::Unpause);
+        assert!(
+            !instance_has_proposal(&env, &contract, id),
+            "proposal {} lingered in instance storage",
+            id
+        );
+    }
+
+    assert_eq!(
+        instance_entry_count(&env, &contract),
+        baseline,
+        "instance storage grew across propose+execute cycles"
+    );
+}
+
+#[test]
+fn test_expired_proposal_can_be_pruned_from_instance_storage() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().with_mut(|l| l.timestamp = 1000);
+
+    // Threshold 2, so a single proposal never auto-executes and goes stale.
+    let (contract, _, _, _, signer1, _signer2) = setup_multisig(&env);
+
+    let baseline = instance_entry_count(&env, &contract);
+    let proposal_id = contract.propose_admin_action(&signer1, &AdminAction::Pause);
+    assert!(instance_has_proposal(&env, &contract, proposal_id));
+    assert!(instance_entry_count(&env, &contract) > baseline);
+
+    env.ledger()
+        .with_mut(|l| l.timestamp += MULTISIG_PROPOSAL_TTL + 1);
+
+    contract.prune_expired_proposal(&proposal_id);
+
+    assert!(
+        !instance_has_proposal(&env, &contract, proposal_id),
+        "expired proposal must be evicted from instance storage"
+    );
+    let archived = archived_proposal(&env, &contract, proposal_id)
+        .expect("pruned proposal should remain readable in persistent storage");
+    assert!(
+        !archived.executed,
+        "an expired proposal must not be recorded as executed"
+    );
+    // Back to the pre-proposal size plus `MultiSigProposalCount`, which is a
+    // single monotonic u64 that must persist so ids are never reused.
+    assert_eq!(
+        instance_entry_count(&env, &contract),
+        baseline + 1,
+        "pruning should leave only the proposal counter behind"
+    );
+
+    // And the expiry path, like the execution path, must be repeatable without
+    // instance storage creeping upward.
+    let steady = instance_entry_count(&env, &contract);
+    for _ in 0..20 {
+        let id = contract.propose_admin_action(&signer1, &AdminAction::Pause);
+        env.ledger()
+            .with_mut(|l| l.timestamp += MULTISIG_PROPOSAL_TTL + 1);
+        contract.prune_expired_proposal(&id);
+        assert!(!instance_has_proposal(&env, &contract, id));
+    }
+    assert_eq!(
+        instance_entry_count(&env, &contract),
+        steady,
+        "instance storage grew across propose+expire+prune cycles"
+    );
+}
+
+#[test]
+fn test_prune_expired_proposal_rejects_a_still_live_proposal() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().with_mut(|l| l.timestamp = 1000);
+
+    let (contract, _, _, _, signer1, _signer2) = setup_multisig(&env);
+    let proposal_id = contract.propose_admin_action(&signer1, &AdminAction::Pause);
+
+    // One second short of the TTL — still actionable, so not prunable.
+    env.ledger()
+        .with_mut(|l| l.timestamp += MULTISIG_PROPOSAL_TTL);
+
+    let res = contract.try_prune_expired_proposal(&proposal_id);
+    assert!(res.is_err(), "live proposal must not be prunable"); // ProposalNotExpirable (#40)
+    assert!(instance_has_proposal(&env, &contract, proposal_id));
+}
+
+#[test]
+fn test_prune_expired_proposal_unknown_id_rejected() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().with_mut(|l| l.timestamp = 1000);
+
+    let (contract, _, _, _, _signer1, _signer2) = setup_multisig(&env);
+
+    let res = contract.try_prune_expired_proposal(&999u64);
+    assert!(res.is_err()); // MultiSigProposalNotFound (#31)
+}
+
+#[test]
+fn test_archived_proposal_still_reports_already_executed() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().with_mut(|l| l.timestamp = 1000);
+
+    let (contract, _, _, _, admin) = setup_test(&env);
+    let proposal_id = contract.propose_admin_action(&admin, &AdminAction::Unpause);
+
+    // Archiving must not degrade the error into "not found": the proposal is
+    // gone from instance storage but its outcome is still knowable.
+    let res = contract.try_execute_proposal(&admin, &proposal_id);
+    assert_eq!(
+        res,
+        Err(Ok(EscrowError::MultiSigAlreadyExecuted)),
+        "re-executing an archived proposal should report AlreadyExecuted"
+    );
+
+    let res = contract.try_approve_admin_action(&admin, &proposal_id);
+    assert_eq!(res, Err(Ok(EscrowError::MultiSigAlreadyExecuted)));
+}
+
+// ── Issue #1154: SetFeeBps validated when proposed, not only when executed ───
+
+#[test]
+fn test_propose_set_fee_bps_above_max_rejected_at_proposal_time() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().with_mut(|l| l.timestamp = 1000);
+
+    // Threshold 2 so the proposal would otherwise sit awaiting approvals and
+    // only fail much later, at execution time.
+    let (contract, _, _, _, signer1, _signer2) = setup_multisig(&env);
+    let baseline = instance_entry_count(&env, &contract);
+
+    let res = contract
+        .try_propose_admin_action(&signer1, &AdminAction::SetFeeBps(crate::MAX_FEE_BPS + 1));
+    assert_eq!(res, Err(Ok(EscrowError::InvalidFee)));
+
+    // The proposal must never have been created: no stored proposal, and the
+    // counter is untouched so the next valid proposal still gets id 1.
+    assert!(!instance_has_proposal(&env, &contract, 1));
+    assert_eq!(
+        instance_entry_count(&env, &contract),
+        baseline,
+        "a rejected proposal must not leave anything in storage"
+    );
+
+    let next_id = contract.propose_admin_action(&signer1, &AdminAction::SetFeeBps(crate::MAX_FEE_BPS));
+    assert_eq!(next_id, 1, "rejected proposal must not consume a proposal id");
+}
+
+#[test]
+fn test_propose_set_fee_bps_at_max_is_accepted_and_executes() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().with_mut(|l| l.timestamp = 1000);
+
+    let (contract, _, _, _, admin) = setup_test(&env);
+
+    // Boundary: exactly MAX_FEE_BPS is valid and still auto-executes.
+    let proposal_id =
+        contract.propose_admin_action(&admin, &AdminAction::SetFeeBps(crate::MAX_FEE_BPS));
+    let archived = archived_proposal(&env, &contract, proposal_id)
+        .expect("valid fee proposal should execute and archive");
+    assert!(archived.executed);
+    assert_eq!(current_fee_bps(&env, &contract), crate::MAX_FEE_BPS);
+}
+
+// ── Issue #1155: AddSigner/RemoveSigner no-ops must not report success ───────
+
+#[test]
+fn test_add_signer_already_present_is_rejected() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().with_mut(|l| l.timestamp = 1000);
+
+    let (contract, _, _, _, admin) = setup_test(&env);
+    let signers_before = current_signers(&env, &contract);
+
+    // `admin` is already a signer — this used to succeed while changing nothing.
+    let res = contract.try_propose_admin_action(&admin, &AdminAction::AddSigner(admin.clone()));
+    assert_eq!(res, Err(Ok(EscrowError::AlreadyInitialized)));
+
+    assert_eq!(
+        current_signers(&env, &contract),
+        signers_before,
+        "a rejected AddSigner must leave the signer set untouched"
+    );
+    // The failed execution must not leave an "executed" record behind.
+    assert!(archived_proposal(&env, &contract, 1).is_none());
+}
+
+#[test]
+fn test_remove_signer_not_present_is_rejected() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().with_mut(|l| l.timestamp = 1000);
+
+    let (contract, _, _, _, signer1, _signer2) = setup_multisig(&env);
+    let stranger = Address::generate(&env);
+    let signers_before = current_signers(&env, &contract);
+
+    // Threshold is 2, so drive the proposal to execution via a real approval.
+    let proposal_id =
+        contract.propose_admin_action(&signer1, &AdminAction::RemoveSigner(stranger.clone()));
+    let res = contract.try_approve_admin_action(&_signer2, &proposal_id);
+    assert_eq!(res, Err(Ok(EscrowError::SignerNotFound)));
+
+    assert_eq!(
+        current_signers(&env, &contract),
+        signers_before,
+        "a rejected RemoveSigner must leave the signer set untouched"
+    );
+    assert!(
+        archived_proposal(&env, &contract, proposal_id).is_none(),
+        "a failed removal must not be archived as executed"
+    );
+}
+
+#[test]
+fn test_add_and_remove_signer_still_work_for_real_changes() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().with_mut(|l| l.timestamp = 1000);
+
+    let (contract, _, _, _, admin) = setup_test(&env);
+    let newcomer = Address::generate(&env);
+
+    let add_id = contract.propose_admin_action(&admin, &AdminAction::AddSigner(newcomer.clone()));
+    assert!(current_signers(&env, &contract).contains(&newcomer));
+    assert!(
+        archived_proposal(&env, &contract, add_id)
+            .expect("real add should be archived")
+            .executed
+    );
+
+    // Threshold is 1 and there are now 2 signers, so the removal is permitted.
+    let remove_id =
+        contract.propose_admin_action(&admin, &AdminAction::RemoveSigner(newcomer.clone()));
+    assert!(!current_signers(&env, &contract).contains(&newcomer));
+    assert!(
+        archived_proposal(&env, &contract, remove_id)
+            .expect("real removal should be archived")
+            .executed
+    );
+}
+
+#[test]
+fn test_remove_signer_below_threshold_still_rejected() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().with_mut(|l| l.timestamp = 1000);
+
+    // 2 signers, threshold 2 — removing either would drop the set below it.
+    let (contract, _, _, _, signer1, signer2) = setup_multisig(&env);
+
+    let proposal_id =
+        contract.propose_admin_action(&signer1, &AdminAction::RemoveSigner(signer2.clone()));
+    let res = contract.try_approve_admin_action(&signer2, &proposal_id);
+    assert_eq!(res, Err(Ok(EscrowError::InvalidThreshold)));
+    assert_eq!(current_signers(&env, &contract).len(), 2);
+}
+
+// ── Issue #1158: bump_escrow must actually extend the job's TTL ──────────────
+
+#[test]
+fn test_bump_escrow_extends_job_ttl() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().with_mut(|l| {
+        l.timestamp = 1000;
+        l.sequence_number = 1;
+    });
+
+    let (contract, client, freelancer, token, _admin) = setup_test(&env);
+    let milestones = vec![&env, (String::from_str(&env, "Work"), 1000_i128, JOB_DEADLINE)];
+    let job_id = contract.create_job(
+        &client, &freelancer, &token, &milestones, &JOB_DEADLINE, &GRACE_PERIOD,
+        &DEFAULT_EXPIRY_LEDGER,
+    );
+
+    let key = crate::DataKey::Job(job_id);
+
+    // Let a large part of the original TTL burn down before bumping.
+    env.ledger().with_mut(|l| l.sequence_number = 400_000);
+    let ttl_before =
+        env.as_contract(&contract.address, || env.storage().persistent().get_ttl(&key));
+
+    contract.bump_escrow(&job_id);
+
+    let ttl_after =
+        env.as_contract(&contract.address, || env.storage().persistent().get_ttl(&key));
+
+    assert!(
+        ttl_after > ttl_before,
+        "bump_escrow should extend the TTL (before: {}, after: {})",
+        ttl_before,
+        ttl_after
+    );
+    assert_eq!(
+        ttl_after,
+        crate::ESCROW_TTL_LEDGERS,
+        "bump_escrow should extend the job key to the full escrow TTL"
+    );
+}
+
+#[test]
+fn test_bump_escrow_keeps_job_readable_past_its_original_ttl() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().with_mut(|l| {
+        l.timestamp = 1000;
+        l.sequence_number = 1;
+    });
+
+    let (contract, client, freelancer, token, _admin) = setup_test(&env);
+    let milestones = vec![&env, (String::from_str(&env, "Work"), 1000_i128, JOB_DEADLINE)];
+    let job_id = contract.create_job(
+        &client, &freelancer, &token, &milestones, &JOB_DEADLINE, &GRACE_PERIOD,
+        &DEFAULT_EXPIRY_LEDGER,
+    );
+
+    // Bump partway through the original window, then advance past where the
+    // entry would have been archived had the bump not taken effect.
+    env.ledger().with_mut(|l| l.sequence_number = 400_000);
+    contract.bump_escrow(&job_id);
+    env.ledger().with_mut(|l| l.sequence_number = 700_000);
+
+    let job = contract.get_job(&job_id);
+    assert_eq!(job.id, job_id);
+}
+
+#[test]
+fn test_bump_escrow_unknown_job_rejected() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().with_mut(|l| l.timestamp = 1000);
+
+    let (contract, _, _, _, _admin) = setup_test(&env);
+
+    let res = contract.try_bump_escrow(&999u64);
+    assert_eq!(res, Err(Ok(EscrowError::JobNotFound)));
+}
+
+// ─── Public config getters: max milestones and proposal expiry ───────────────
+
+#[test]
+fn test_get_max_milestones_returns_contract_limit() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (contract, _client, _freelancer, _token, _admin) = setup_test(&env);
+
+    assert_eq!(contract.get_max_milestones(), MAX_MILESTONES);
+}
+
+#[test]
+fn test_get_proposal_expiry_returns_value_set_at_initialize() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let contract_id = env.register_contract(None, EscrowContract);
+    let client = EscrowContractClient::new(&env, &contract_id);
+    let admin = Address::generate(&env);
+    let treasury = Address::generate(&env);
+
+    client.initialize(&vec![&env, admin.clone()], &1, &treasury, &0, &86_400);
+
+    assert_eq!(client.get_proposal_expiry(), 86_400);
+}
+
+#[test]
+fn test_get_proposal_expiry_matches_default_when_configured_at_seven_days() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (contract, _client, _freelancer, _token, _admin) = setup_test(&env);
+
+    // setup_test initializes with 604800 seconds, which equals DEFAULT_PROPOSAL_EXPIRY_SECS.
+    assert_eq!(contract.get_proposal_expiry(), DEFAULT_PROPOSAL_EXPIRY_SECS);
 }

@@ -37,12 +37,24 @@ export const errorHandler = (
   } else if (err.name === 'PrismaClientKnownRequestError') {
     const prismaErr = err as unknown as { code?: string; meta?: { target?: unknown } };
     code = ErrorCodes.DATABASE_ERROR;
-    statusCode = 400;
     message = 'Database operation failed';
     details = {
       prismaCode: prismaErr.code,
       target: prismaErr.meta?.target,
     };
+
+    switch (prismaErr.code) {
+      case 'P2025':
+        statusCode = 404;
+        message = 'Record not found';
+        break;
+      case 'P2002':
+        statusCode = 409;
+        message = 'Unique constraint violation';
+        break;
+      default:
+        statusCode = 400;
+    }
   } else if (err.name === 'ContractSimulationError') {
     code = ErrorCodes.CONTRACT_SIMULATION_ERROR;
     statusCode = 422;
@@ -62,13 +74,24 @@ export const errorHandler = (
   } else if (err.name === 'MulterError') {
     code = ErrorCodes.FILE_UPLOAD_FAILED;
     statusCode = 400;
-    const multerCode = (err as unknown as { code?: string }).code;
+    const multerErr = err as unknown as { code?: string, field?: string };
+    const multerCode = multerErr.code;
+    const isAvatarRoute = req.originalUrl.includes('/avatar');
+
     if (multerCode === 'LIMIT_FILE_SIZE') {
       code = ErrorCodes.FILE_TOO_LARGE;
-      message = 'File too large. Avatar must be at most 2MB.';
+      if (isAvatarRoute) {
+        message = 'File too large. Avatar must be at most 2MB.';
+      } else {
+        message = `File too large for field '${multerErr.field || 'unknown'}'.`;
+      }
     } else if (multerCode === 'LIMIT_UNEXPECTED_FILE') {
       code = ErrorCodes.UNEXPECTED_FIELD;
-      message = "Unexpected field. Use 'avatar' for the file.";
+      if (isAvatarRoute) {
+        message = "Unexpected field. Use 'avatar' for the file.";
+      } else {
+        message = `Unexpected field '${multerErr.field || 'unknown'}'.`;
+      }
     } else {
       message = 'File upload failed.';
     }

@@ -6,7 +6,7 @@ import { asyncHandler } from "../middleware/error";
 import { validate } from "../middleware/validation";
 import { freelancerSearchQuerySchema, getUserByIdParamSchema } from "../schemas";
 import { searchFreelancers } from "../services/freelancer-search.service";
-import { ReputationService } from "../services/reputation.service";
+import { ReputationCacheService } from "../services/reputation-cache.service";
 import {
   fetchOnChainPayments,
   loadDbEarnings,
@@ -150,6 +150,62 @@ router.get(
 );
 
 /**
+ * GET /api/freelancers/earnings/summary?freelancerId=<id>
+ * Public total-earnings figure for a freelancer's public profile page. No auth
+ * required since this is displayed to any visitor viewing the profile.
+ */
+router.get(
+  "/earnings/summary",
+  validate({
+    query: z.object({
+      freelancerId: z.string().min(1),
+    }),
+  }),
+  asyncHandler(async (req: Request, res: Response) => {
+    const { freelancerId } = req.query as unknown as { freelancerId: string };
+
+    const freelancer = await prisma.user.findUnique({ where: { id: freelancerId } });
+    if (!freelancer || !freelancer.walletAddress) {
+      return res.json({ total: 0 });
+    }
+
+    const totalEarnedAgg = await prisma.transaction.aggregate({
+      where: {
+        toAddress: freelancer.walletAddress,
+        type: { in: ["RELEASE", "DISPUTE_PAYOUT"] },
+      },
+      _sum: { amount: true },
+    });
+
+    res.json({ total: totalEarnedAgg._sum.amount ?? 0 });
+  }),
+);
+
+/**
+ * Resolve the authenticated user, asserting they are a freelancer with a wallet.
+ * Returns the wallet on success, or writes an error response and returns null.
+ */
+async function requireFreelancerWallet(
+  req: AuthRequest,
+  res: Response,
+): Promise<{ userId: string; wallet: string } | null> {
+  const user = await prisma.user.findUnique({ where: { id: req.userId } });
+  if (!user) {
+    res.status(404).json({ error: "User not found" });
+    return null;
+  }
+  if (user.role !== "FREELANCER") {
+    res.status(403).json({ error: "Only freelancers can access earnings" });
+    return null;
+  }
+  if (!user.walletAddress) {
+    res.status(400).json({ error: "Freelancer has no wallet address." });
+    return null;
+  }
+  return { userId: user.id, wallet: user.walletAddress };
+}
+
+/**
  * GET /api/freelancers/earnings
  * Get earnings summary, monthly + weekly chart data, category breakdown, and
  * paginated transaction history for the authenticated freelancer.
@@ -169,13 +225,8 @@ router.get(
     }),
   }),
   asyncHandler(async (req: AuthRequest, res: Response) => {
-    const user = await prisma.user.findUnique({ where: { id: req.userId } });
-    if (!user) {
-      return res.status(404).json({ error: "User not found" });
-    }
-    if (user.role !== "FREELANCER") {
-      return res.status(403).json({ error: "Only freelancers can access earnings" });
-    }
+    const auth = await requireFreelancerWallet(req, res);
+    if (!auth) return;
 
     const query = req.query as unknown as {
       page: number;
@@ -185,11 +236,7 @@ router.get(
     };
     const { page = 1, limit = 10 } = query;
     const skip = (Number(page) - 1) * Number(limit);
-    const wallet = user.walletAddress;
-
-    if (!wallet) {
-      return res.status(400).json({ error: "Freelancer has no wallet address." });
-    }
+    const { userId, wallet } = auth;
 
     const fallback = defaultRange();
     const rangeFrom = query.from ?? fallback.from;
@@ -219,7 +266,7 @@ router.get(
       // Pending release: IN_PROGRESS jobs assigned to freelancer
       prisma.job.aggregate({
         where: {
-          freelancerId: user.id,
+          freelancerId: userId,
           status: "IN_PROGRESS",
         },
         _sum: { budget: true },
@@ -227,7 +274,7 @@ router.get(
       // Active escrow: FUNDED escrow jobs assigned to freelancer
       prisma.job.aggregate({
         where: {
-          freelancerId: user.id,
+          freelancerId: userId,
           escrowStatus: "FUNDED",
         },
         _sum: { budget: true },
@@ -345,30 +392,6 @@ router.get(
     });
   }),
 );
-
-/**
- * Resolve the authenticated user, asserting they are a freelancer with a wallet.
- * Returns the wallet on success, or writes an error response and returns null.
- */
-async function requireFreelancerWallet(
-  req: AuthRequest,
-  res: Response,
-): Promise<{ userId: string; wallet: string } | null> {
-  const user = await prisma.user.findUnique({ where: { id: req.userId } });
-  if (!user) {
-    res.status(404).json({ error: "User not found" });
-    return null;
-  }
-  if (user.role !== "FREELANCER") {
-    res.status(403).json({ error: "Only freelancers can access earnings" });
-    return null;
-  }
-  if (!user.walletAddress) {
-    res.status(400).json({ error: "Freelancer has no wallet address." });
-    return null;
-  }
-  return { userId: user.id, wallet: user.walletAddress };
-}
 
 /**
  * GET /api/freelancers/earnings/reconcile?from=<ISO>&to=<ISO>
@@ -538,24 +561,22 @@ router.get(
       skip: offset,
     });
 
-    // Fetch on-chain reputation for each freelancer
-    const freelancersWithReputation = await Promise.all(
-      topFreelancers.map(async (freelancer) => {
-        const reputation = await ReputationService.getReputation(
-          freelancer.walletAddress ?? ""
-        );
-        return {
-          ...freelancer,
-          reputation: reputation
-            ? {
-                totalScore: reputation.total_score.toString(),
-                totalWeight: reputation.total_weight.toString(),
-                reviewCount: reputation.review_count,
-              }
-            : null,
-        };
-      })
-    );
+    const addresses = topFreelancers.map((f) => f.walletAddress ?? "");
+    const reputationMap = await ReputationCacheService.getBatchCachedReputation(addresses);
+
+    const freelancersWithReputation = topFreelancers.map((freelancer) => {
+      const reputation = reputationMap.get(freelancer.walletAddress ?? "") ?? null;
+      return {
+        ...freelancer,
+        reputation: reputation
+          ? {
+              totalScore: reputation.score.toString(),
+              totalWeight: reputation.endorsementWeight.toString(),
+              reviewCount: 0,
+            }
+          : null,
+      };
+    });
 
     const total = await prisma.user.count({ where });
 
@@ -639,14 +660,15 @@ router.get(
       return res.status(304).end();
     }
 
-    const reputation = await ReputationService.getReputation(freelancer.walletAddress ?? "");
+    const reputation = await ReputationCacheService.getCachedReputation(freelancer.walletAddress ?? "");
 
     res.json({
       ...freelancer,
       reputation: reputation ? {
-        totalScore: reputation.total_score.toString(),
-        totalWeight: reputation.total_weight.toString(),
-        reviewCount: reputation.review_count,
+totalScore: reputation.score.toString(),
+totalWeight: reputation.endorsementWeight.toString(),
+reviewCount: 0,
+tier: reputation.tier,
       } : null
     });
   }),

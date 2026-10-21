@@ -60,6 +60,7 @@ jest.mock("../../lib/logger", () => ({
 
 // ─── Import after mocks ───────────────────────────────────────────────────────
 import { WebhookService } from "../webhook.service";
+import { logger } from "../../lib/logger";
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 function computeExpectedSignature(secret: string, body: string): string {
@@ -157,11 +158,44 @@ describe("WebhookService — HMAC-SHA256 signature (#463)", () => {
   it("does not deliver when max attempts reached", async () => {
     mockFindUnique.mockResolvedValue({
       ...mockDelivery,
-      attempts: 3, // MAX_ATTEMPTS
+      attempts: 4, // MAX_ATTEMPTS: 1 initial attempt + 3 retries
     });
 
     await WebhookService.deliver("del-1");
     expect(mockFetch).not.toHaveBeenCalled();
+  });
+});
+
+describe("WebhookService — retry policy", () => {
+  const start = new Date("2024-01-01T00:00:00Z");
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+    jest.useFakeTimers();
+    jest.setSystemTime(start);
+    mockFetch.mockResolvedValue({ ok: false, status: 500 });
+    mockUpdate.mockResolvedValue({});
+  });
+
+  afterEach(() => {
+    jest.useRealTimers();
+  });
+
+  it("makes 4 attempts total and uses every configured retry delay before marking failed", async () => {
+    for (let attempts = 0; attempts < 4; attempts++) {
+      mockFindUnique.mockResolvedValueOnce({ ...mockDelivery, attempts });
+      await WebhookService.deliver("del-1");
+    }
+
+    expect(mockFetch).toHaveBeenCalledTimes(4);
+
+    const updates = mockUpdate.mock.calls.map(([arg]) => arg.data);
+    expect(updates.map((d) => d.status)).toEqual(["pending", "pending", "pending", "failed"]);
+
+    const retryDelays = updates.slice(0, 3).map((d) => d.nextRetry.getTime() - start.getTime());
+    expect(retryDelays).toEqual([30_000, 120_000, 600_000]);
+
+    expect(updates[3].nextRetry).toBeNull();
   });
 });
 
@@ -176,5 +210,31 @@ describe("WebhookService — supported events", () => {
 
   it("rejects unknown event types", () => {
     expect(WebhookService.isSupportedEvent("unknown.event")).toBe(false);
+  });
+});
+
+describe("WebhookService — unexpected failures inside deliver() (#1636)", () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+  });
+
+  it("resolves and logs when the DB lookup at the top of deliver() rejects", async () => {
+    mockFindUnique.mockRejectedValueOnce(new Error("db unavailable"));
+
+    await expect(WebhookService.deliver("del-1")).resolves.toBeUndefined();
+    expect(mockFetch).not.toHaveBeenCalled();
+    expect(logger.error).toHaveBeenCalledWith(
+      expect.objectContaining({ deliveryId: "del-1" }),
+      expect.any(String),
+    );
+  });
+
+  it("resolves and logs when the DB update at the bottom of deliver() rejects", async () => {
+    mockFindUnique.mockResolvedValueOnce({ ...mockDelivery });
+    mockFetch.mockResolvedValueOnce({ ok: true, status: 200 });
+    mockUpdate.mockRejectedValueOnce(new Error("db write failed"));
+
+    await expect(WebhookService.deliver("del-1")).resolves.toBeUndefined();
+    expect(logger.error).toHaveBeenCalled();
   });
 });

@@ -1,55 +1,103 @@
-import { validateFileMimeType } from "../utils/fileValidation";
-import fs from "fs";
-import path from "path";
-import os from "os";
-import { Buffer } from "buffer";
+/**
+ * Additional tests for fileValidation utility functions
+ * Closes #1437: Tests formatFileSize and getExtensionFromMimeType
+ */
 
-describe("validateFileMimeType", () => {
-  let tempDir: string;
+import { formatFileSize, getExtensionFromMimeType } from '../utils/fileValidation';
 
-  beforeAll(() => {
-    tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "file-validation-test-"));
+describe('formatFileSize', () => {
+  it('formats 0 bytes correctly', () => {
+    expect(formatFileSize(0)).toBe('0 Bytes');
   });
 
-  afterAll(() => {
-    fs.rmSync(tempDir, { recursive: true, force: true });
+  it('formats bytes under 1 KB', () => {
+    expect(formatFileSize(500)).toBe('500 Bytes');
   });
 
-  const createTestFile = (filename: string, magicBytes: number[]) => {
-    const filePath = path.join(tempDir, filename);
-    const buffer = Buffer.alloc(12);
-    for (let i = 0; i < magicBytes.length; i++) {
-      buffer[i] = magicBytes[i];
-    }
-    fs.writeFileSync(filePath, buffer);
-    return filePath;
-  };
-
-  it("should recognize ZIP magic bytes (50 4B 03 04)", async () => {
-    const filePath = createTestFile("test1.zip", [0x50, 0x4B, 0x03, 0x04]);
-    const result = await validateFileMimeType(filePath);
-    expect(result.valid).toBe(true);
-    expect(result.detectedType).toBe("application/zip");
+  it('formats exactly 1023 bytes (boundary before KB)', () => {
+    expect(formatFileSize(1023)).toBe('1023 Bytes');
   });
 
-  it("should recognize ZIP magic bytes (50 4B 05 06)", async () => {
-    const filePath = createTestFile("test2.zip", [0x50, 0x4B, 0x05, 0x06]);
-    const result = await validateFileMimeType(filePath);
-    expect(result.valid).toBe(true);
-    expect(result.detectedType).toBe("application/zip");
+  it('formats exactly 1024 bytes (1 KB boundary)', () => {
+    expect(formatFileSize(1024)).toBe('1 KB');
   });
 
-  it("should recognize ZIP magic bytes (50 4B 07 08)", async () => {
-    const filePath = createTestFile("test3.zip", [0x50, 0x4B, 0x07, 0x08]);
-    const result = await validateFileMimeType(filePath);
-    expect(result.valid).toBe(true);
-    expect(result.detectedType).toBe("application/zip");
+  it('formats KB correctly', () => {
+    expect(formatFileSize(2048)).toBe('2 KB');
   });
 
-  it("should reject invalid magic bytes", async () => {
-    const filePath = createTestFile("invalid.zip", [0x00, 0x01, 0x02, 0x03]);
-    const result = await validateFileMimeType(filePath);
-    expect(result.valid).toBe(false);
-    expect(result.error).toBe("Unsupported file type signature");
+  it('formats exactly 1 MB boundary (1024 * 1024)', () => {
+    expect(formatFileSize(1024 * 1024)).toBe('1 MB');
+  });
+
+  it('formats MB correctly', () => {
+    expect(formatFileSize(5 * 1024 * 1024)).toBe('5 MB');
+  });
+
+  it('formats exactly 1 GB boundary (1024 * 1024 * 1024)', () => {
+    expect(formatFileSize(1024 * 1024 * 1024)).toBe('1 GB');
+  });
+
+  it('formats GB correctly', () => {
+    expect(formatFileSize(2.5 * 1024 * 1024 * 1024)).toBe('2.5 GB');
+  });
+
+  it('handles fractional values with proper rounding', () => {
+    // 1.5 MB
+    expect(formatFileSize(1.5 * 1024 * 1024)).toBe('1.5 MB');
+  });
+
+  it('returns 0 Bytes for negative byte counts (#1641)', () => {
+    expect(formatFileSize(-1)).toBe('0 Bytes');
+    expect(formatFileSize(-1024)).toBe('0 Bytes');
+  });
+
+  it('clamps to GB for sizes at or above 1 TB (#1641)', () => {
+    // Exactly 1 TB
+    expect(formatFileSize(1024 * 1024 * 1024 * 1024)).toBe('1024 GB');
+    // 1.5 TB
+    expect(formatFileSize(1.5 * 1024 * 1024 * 1024 * 1024)).toBe('1536 GB');
+  });
+});
+
+describe('getExtensionFromMimeType', () => {
+  it('returns .pdf for application/pdf', () => {
+    expect(getExtensionFromMimeType('application/pdf')).toBe('.pdf');
+  });
+
+  it('returns .jpg for image/jpeg', () => {
+    expect(getExtensionFromMimeType('image/jpeg')).toBe('.jpg');
+  });
+
+  it('returns .png for image/png', () => {
+    expect(getExtensionFromMimeType('image/png')).toBe('.png');
+  });
+
+  it('returns .mp4 for video/mp4', () => {
+    expect(getExtensionFromMimeType('video/mp4')).toBe('.mp4');
+  });
+
+  it('returns .zip for application/zip', () => {
+    expect(getExtensionFromMimeType('application/zip')).toBe('.zip');
+  });
+
+  it('returns .zip for application/x-zip-compressed', () => {
+    expect(getExtensionFromMimeType('application/x-zip-compressed')).toBe('.zip');
+  });
+
+  it('returns .docx for Word document MIME type', () => {
+    expect(
+      getExtensionFromMimeType(
+        'application/vnd.openxmlformats-officedocument.wordprocessingml.document'
+      )
+    ).toBe('.docx');
+  });
+
+  it('returns empty string for unknown MIME type', () => {
+    expect(getExtensionFromMimeType('application/unknown')).toBe('');
+  });
+
+  it('returns empty string for text/plain', () => {
+    expect(getExtensionFromMimeType('text/plain')).toBe('');
   });
 });

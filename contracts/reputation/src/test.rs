@@ -3041,10 +3041,10 @@ fn test_stake_weight_at_u64_max_saturates() {
     );
 
     let rep = reputation_client.get_reputation(&reviewee);
-    // Weight should be saturated to u64::MAX, not wrapped
-    assert_eq!(rep.total_weight, u64::MAX);
-    // Score (rating * weight) also saturates to u64::MAX rather than overflowing
-    assert_eq!(rep.total_score, u64::MAX);
+    // Weight is capped at MAX_STAKE_WEIGHT_PER_REVIEW regardless of raw stake size.
+    assert_eq!(rep.total_weight, MAX_STAKE_WEIGHT_PER_REVIEW);
+    // Score = rating (5) * capped weight.
+    assert_eq!(rep.total_score, 5 * MAX_STAKE_WEIGHT_PER_REVIEW);
 }
 
 #[test]
@@ -3079,10 +3079,10 @@ fn test_stake_weight_above_u64_max_saturates() {
     );
 
     let rep = reputation_client.get_reputation(&reviewee);
-    // Weight should be saturated to u64::MAX, not a wrapped/truncated value
-    assert_eq!(rep.total_weight, u64::MAX);
-    // Score (rating * weight) also saturates to u64::MAX rather than overflowing
-    assert_eq!(rep.total_score, u64::MAX);
+    // Weight is capped at MAX_STAKE_WEIGHT_PER_REVIEW regardless of raw stake size.
+    assert_eq!(rep.total_weight, MAX_STAKE_WEIGHT_PER_REVIEW);
+    // Score = rating (4) * capped weight.
+    assert_eq!(rep.total_score, 4 * MAX_STAKE_WEIGHT_PER_REVIEW);
 }
 
 #[test]
@@ -3145,8 +3145,8 @@ fn test_stake_weight_decay_saturates_large_values() {
     });
 
     let rep = reputation_client.get_reputation(&reviewee);
-    // Weight started at u64::MAX (saturated), after 5% decay: 95% of u64::MAX
-    let expected_weight = (u64::MAX as u128 * 95 / 100) as u64;
+    // Weight started at MAX_STAKE_WEIGHT_PER_REVIEW (capped on write), after 5% decay: 95% of cap.
+    let expected_weight = MAX_STAKE_WEIGHT_PER_REVIEW * 95 / 100;
     assert_eq!(rep.total_weight, expected_weight);
 }
 
@@ -3582,6 +3582,8 @@ fn test_claim_stake_partial_withdrawal() {
     
     // Mint tokens and submit a review to stake them
     mint(&env, &token_addr, &token_admin, &reviewer, 100_000_000);
+    // Start at t=1000 so advancing by STAKE_LOCKUP_SECONDS gives a clean timestamp.
+    env.ledger().with_mut(|l| l.timestamp = 1000);
     setup_completed_job(&env, &escrow_id, 1u64, &reviewer, &reviewee, &token_addr);
 
     reputation_client.submit_review(
@@ -3593,6 +3595,9 @@ fn test_claim_stake_partial_withdrawal() {
         &String::from_str(&env, "Good work"),
         &MIN_STAKE,
     );
+
+    // Advance past the 7-day lockup window before claiming.
+    env.ledger().with_mut(|l| l.timestamp = 1000 + STAKE_LOCKUP_SECONDS + 1);
 
     // Partial claim: withdraw half of the staked amount
     let claim_amount = MIN_STAKE / 2;
@@ -3618,6 +3623,7 @@ fn test_claim_stake_full_withdrawal() {
     let token_addr = create_token(&env, &token_admin);
     
     mint(&env, &token_addr, &token_admin, &reviewer, 100_000_000);
+    env.ledger().with_mut(|l| l.timestamp = 1000);
     setup_completed_job(&env, &escrow_id, 1u64, &reviewer, &reviewee, &token_addr);
 
     reputation_client.submit_review(
@@ -3629,6 +3635,9 @@ fn test_claim_stake_full_withdrawal() {
         &String::from_str(&env, "Good work"),
         &MIN_STAKE,
     );
+
+    // Advance past the 7-day lockup before claiming.
+    env.ledger().with_mut(|l| l.timestamp = 1000 + STAKE_LOCKUP_SECONDS + 1);
 
     // Full claim: withdraw entire staked amount
     reputation_client.claim_stake(&reviewer, &MIN_STAKE);
@@ -3654,6 +3663,7 @@ fn test_claim_stake_exceeds_balance() {
     let token_addr = create_token(&env, &token_admin);
     
     mint(&env, &token_addr, &token_admin, &reviewer, 100_000_000);
+    env.ledger().with_mut(|l| l.timestamp = 1000);
     setup_completed_job(&env, &escrow_id, 1u64, &reviewer, &reviewee, &token_addr);
 
     reputation_client.submit_review(
@@ -3665,6 +3675,9 @@ fn test_claim_stake_exceeds_balance() {
         &String::from_str(&env, "Good work"),
         &MIN_STAKE,
     );
+
+    // Advance past lockup so the balance-exceeded check is reached, not the lockup check.
+    env.ledger().with_mut(|l| l.timestamp = 1000 + STAKE_LOCKUP_SECONDS + 1);
 
     // Attempt to claim more than the available balance
     // Should fail with BelowMinStake (#11)
@@ -3687,6 +3700,7 @@ fn test_claim_stake_zero_amount() {
     let token_addr = create_token(&env, &token_admin);
     
     mint(&env, &token_addr, &token_admin, &reviewer, 100_000_000);
+    env.ledger().with_mut(|l| l.timestamp = 1000);
     setup_completed_job(&env, &escrow_id, 1u64, &reviewer, &reviewee, &token_addr);
 
     reputation_client.submit_review(
@@ -3698,6 +3712,9 @@ fn test_claim_stake_zero_amount() {
         &String::from_str(&env, "Good work"),
         &MIN_STAKE,
     );
+
+    // Advance past lockup so only the zero-amount check fires.
+    env.ledger().with_mut(|l| l.timestamp = 1000 + STAKE_LOCKUP_SECONDS + 1);
 
     // Attempt to claim zero amount
     // Should fail with BelowMinStake (#11)
@@ -3720,6 +3737,7 @@ fn test_claim_stake_negative_amount() {
     let token_addr = create_token(&env, &token_admin);
     
     mint(&env, &token_addr, &token_admin, &reviewer, 100_000_000);
+    env.ledger().with_mut(|l| l.timestamp = 1000);
     setup_completed_job(&env, &escrow_id, 1u64, &reviewer, &reviewee, &token_addr);
 
     reputation_client.submit_review(
@@ -3731,6 +3749,9 @@ fn test_claim_stake_negative_amount() {
         &String::from_str(&env, "Good work"),
         &MIN_STAKE,
     );
+
+    // Advance past lockup so only the negative-amount check fires.
+    env.ledger().with_mut(|l| l.timestamp = 1000 + STAKE_LOCKUP_SECONDS + 1);
 
     // Attempt to claim negative amount
     // Should fail with BelowMinStake (#11)
@@ -3994,4 +4015,1139 @@ fn test_admin_resolve_appeal_reputation_accounting() {
     let expected_weight_after = MIN_STAKE as u64;
     assert_eq!(rep_after_removal.total_score, expected_score_after);
     assert_eq!(rep_after_removal.total_weight, expected_weight_after);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// #1117 — get_decayed_totals must stay bounded regardless of Reviews vector size
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[test]
+fn test_get_decayed_totals_bounded_by_max_reviews_counted() {
+    let env = Env::default();
+    env.mock_all_auths();
+    // Reading back 250 injected reviews is realistic call volume for a
+    // griefed account but exceeds the default sandbox CPU budget; reset it
+    // so the test exercises the counting/capping logic, not gas accounting.
+    env.budget().reset_unlimited();
+
+    let reputation_id = env.register_contract(None, ReputationContract);
+    let client = ReputationContractClient::new(&env, &reputation_id);
+    let admin = Address::generate(&env);
+    client.initialize(&vec![&env, admin.clone()], &1u32, &0u32); // no decay
+
+    let user = Address::generate(&env);
+    let reviewer = Address::generate(&env);
+
+    // 250 reviews (> MAX_REVIEWS_COUNTED = 200): the oldest 50 are 1-star,
+    // the most recent 200 are 5-star. An unbounded average would be pulled
+    // down by the oldest 50; the bounded computation should read as a pure
+    // 5-star average since only the most recent 200 are scored.
+    env.as_contract(&reputation_id, || {
+        let mut reviews: Vec<Review> = Vec::new(&env);
+        for i in 0..250u64 {
+            let rating = if i < 50 { 1u32 } else { 5u32 };
+            reviews.push_back(Review {
+                reviewer: reviewer.clone(),
+                reviewee: user.clone(),
+                job_id: i,
+                rating,
+                comment: String::from_str(&env, ""),
+                stake_weight: MIN_STAKE,
+                timestamp: 0,
+            });
+        }
+        env.storage()
+            .persistent()
+            .set(&DataKey::Reviews(user.clone()), &reviews);
+        env.storage().persistent().set(
+            &DataKey::Reputation(user.clone()),
+            &UserReputation {
+                user: user.clone(),
+                total_score: 0,
+                total_weight: 0,
+                review_count: 250,
+                last_updated_ts: 0,
+            },
+        );
+    });
+
+    let rep = client.get_reputation(&user);
+    assert_eq!(rep.review_count, 250, "full historical count is still reported");
+    assert_eq!(rep.total_score, 5u64 * MIN_STAKE as u64 * 200);
+    assert_eq!(rep.total_weight, MIN_STAKE as u64 * 200);
+
+    // Pure 5-star average, unaffected by the 50 oldest 1-star reviews.
+    assert_eq!(client.get_average_rating(&user), 500);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// #1117 — per-reviewee rate limit complements the read-side cap above
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[test]
+#[should_panic(expected = "Error(Contract, #12)")]
+fn test_reviewee_rate_limit_blocks_burst_reviews() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let escrow_id = env.register_contract(None, EscrowContract);
+    let reputation_id = env.register_contract(None, ReputationContract);
+    let reputation_client = ReputationContractClient::new(&env, &reputation_id);
+    let admin = Address::generate(&env);
+    reputation_client.initialize(&vec![&env, admin.clone()], &1u32, &0u32);
+
+    let reviewer = Address::generate(&env);
+    let reviewee = Address::generate(&env);
+    let token_admin = Address::generate(&env);
+    let token_addr = create_token(&env, &token_admin);
+    mint(&env, &token_addr, &token_admin, &reviewer, 1_000_000_000);
+
+    setup_completed_job(&env, &escrow_id, 1u64, &reviewer, &reviewee, &token_addr);
+
+    // Simulate `reviewee` already having received MAX_REVIEWS_PER_REVIEWEE_WINDOW
+    // reviews earlier in the current rate-limit window (e.g. from many distinct
+    // reviewers/jobs, so the per-reviewer cooldown alone wouldn't stop a griefer).
+    env.as_contract(&reputation_id, || {
+        env.storage().persistent().set(
+            &DataKey::RevieweeReviewWindow(reviewee.clone()),
+            &(0u32, MAX_REVIEWS_PER_REVIEWEE_WINDOW),
+        );
+    });
+
+    // One more review in the same window is rejected even though `reviewer`
+    // has no prior reviews of their own (their per-reviewer cooldown is clear).
+    reputation_client.submit_review(
+        &escrow_id,
+        &reviewer,
+        &reviewee,
+        &1u64,
+        &5u32,
+        &String::from_str(&env, "Spam"),
+        &MIN_STAKE,
+    );
+}
+
+#[test]
+fn test_reviewee_rate_limit_resets_after_window() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let escrow_id = env.register_contract(None, EscrowContract);
+    let reputation_id = env.register_contract(None, ReputationContract);
+    let reputation_client = ReputationContractClient::new(&env, &reputation_id);
+    let admin = Address::generate(&env);
+    reputation_client.initialize(&vec![&env, admin.clone()], &1u32, &0u32);
+
+    let reviewer = Address::generate(&env);
+    let reviewee = Address::generate(&env);
+    let token_admin = Address::generate(&env);
+    let token_addr = create_token(&env, &token_admin);
+    mint(&env, &token_addr, &token_admin, &reviewer, 1_000_000_000);
+
+    setup_completed_job(&env, &escrow_id, 1u64, &reviewer, &reviewee, &token_addr);
+
+    env.as_contract(&reputation_id, || {
+        env.storage().persistent().set(
+            &DataKey::RevieweeReviewWindow(reviewee.clone()),
+            &(0u32, MAX_REVIEWS_PER_REVIEWEE_WINDOW),
+        );
+    });
+
+    // Advance past the rate-limit window (120 ledgers) so the reviewee-side
+    // count resets and a genuine review is accepted again.
+    env.ledger().with_mut(|l| l.sequence_number = 200);
+
+    reputation_client.submit_review(
+        &escrow_id,
+        &reviewer,
+        &reviewee,
+        &1u64,
+        &5u32,
+        &String::from_str(&env, "Fine"),
+        &MIN_STAKE,
+    );
+
+    assert_eq!(reputation_client.get_review_count(&reviewee), 1);
+}
+
+// ================================================================================================
+// Security fix: stake lockup enforcement, stake_weight cap, and governance weight dampening
+// ================================================================================================
+
+/// Reproduce the flash-loan / same-block claim attack:
+/// 1. Reviewer submits a review (stake deposited, lockup timer starts).
+/// 2. Reviewer immediately tries to reclaim the stake.
+/// 3. Must be rejected with StakeLockupActive (#29) — lockup not elapsed.
+#[test]
+#[should_panic(expected = "Error(Contract, #29)")]
+fn test_claim_stake_rejected_before_lockup_elapses() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let escrow_id = env.register_contract(None, EscrowContract);
+    let reputation_id = env.register_contract(None, ReputationContract);
+    let reputation_client = ReputationContractClient::new(&env, &reputation_id);
+
+    let reviewer = Address::generate(&env);
+    let reviewee = Address::generate(&env);
+    let token_admin = Address::generate(&env);
+    let token_addr = create_token(&env, &token_admin);
+
+    mint(&env, &token_addr, &token_admin, &reviewer, 100_000_000);
+    env.ledger().with_mut(|l| l.timestamp = 1_000_000);
+    setup_completed_job(&env, &escrow_id, 1u64, &reviewer, &reviewee, &token_addr);
+
+    reputation_client.submit_review(
+        &escrow_id,
+        &reviewer,
+        &reviewee,
+        &1u64,
+        &5u32,
+        &String::from_str(&env, "Great"),
+        &MIN_STAKE,
+    );
+
+    // Advance only 1 second — far below the 7-day lockup.
+    env.ledger().with_mut(|l| l.timestamp = 1_000_001);
+
+    // Must fail with StakeLockupActive (#29).
+    reputation_client.claim_stake(&reviewer, &MIN_STAKE);
+}
+
+/// Lockup boundary: claim rejected at exactly lockup_end - 1 second, accepted
+/// at lockup_end (staked_at + STAKE_LOCKUP_SECONDS).
+#[test]
+fn test_claim_stake_accepted_exactly_at_lockup_boundary() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let escrow_id = env.register_contract(None, EscrowContract);
+    let reputation_id = env.register_contract(None, ReputationContract);
+    let reputation_client = ReputationContractClient::new(&env, &reputation_id);
+
+    let reviewer = Address::generate(&env);
+    let reviewee = Address::generate(&env);
+    let token_admin = Address::generate(&env);
+    let token_addr = create_token(&env, &token_admin);
+
+    mint(&env, &token_addr, &token_admin, &reviewer, 100_000_000);
+
+    let stake_ts: u64 = 1_000_000;
+    env.ledger().with_mut(|l| l.timestamp = stake_ts);
+    setup_completed_job(&env, &escrow_id, 1u64, &reviewer, &reviewee, &token_addr);
+
+    reputation_client.submit_review(
+        &escrow_id,
+        &reviewer,
+        &reviewee,
+        &1u64,
+        &5u32,
+        &String::from_str(&env, "Good"),
+        &MIN_STAKE,
+    );
+
+    // One second before lockup ends — must still be rejected.
+    env.ledger()
+        .with_mut(|l| l.timestamp = stake_ts + STAKE_LOCKUP_SECONDS - 1);
+    let result = reputation_client.try_claim_stake(&reviewer, &MIN_STAKE);
+    assert!(
+        result.is_err(),
+        "claim must be rejected 1 second before lockup elapses"
+    );
+
+    // Exactly at lockup_end — must succeed.
+    env.ledger()
+        .with_mut(|l| l.timestamp = stake_ts + STAKE_LOCKUP_SECONDS);
+    reputation_client.claim_stake(&reviewer, &MIN_STAKE);
+
+    assert_eq!(reputation_client.get_stake_balance(&reviewer), 0);
+}
+
+/// Incremental stake refresh: a second review resets the lockup anchor.
+/// The original stake cannot be claimed just because the first lockup elapsed —
+/// the second deposit restarts the window for ALL accumulated stake.
+#[test]
+fn test_second_review_resets_lockup_for_all_stake() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let escrow_id = env.register_contract(None, EscrowContract);
+    let reputation_id = env.register_contract(None, ReputationContract);
+    let reputation_client = ReputationContractClient::new(&env, &reputation_id);
+
+    let reviewer = Address::generate(&env);
+    let reviewee1 = Address::generate(&env);
+    let reviewee2 = Address::generate(&env);
+    let token_admin = Address::generate(&env);
+    let token_addr = create_token(&env, &token_admin);
+
+    mint(&env, &token_addr, &token_admin, &reviewer, 1_000_000_000);
+
+    // First review at t=1000.
+    env.ledger().with_mut(|l| l.timestamp = 1000);
+    setup_completed_job(&env, &escrow_id, 1u64, &reviewer, &reviewee1, &token_addr);
+    reputation_client.submit_review(
+        &escrow_id,
+        &reviewer,
+        &reviewee1,
+        &1u64,
+        &5u32,
+        &String::from_str(&env, "Great"),
+        &MIN_STAKE,
+    );
+
+    // Advance past the first lockup window (8 days) and past the rate-limit
+    // window (120 ledgers) so the second review by the same reviewer is allowed.
+    env.ledger().with_mut(|l| {
+        l.timestamp = 1000 + STAKE_LOCKUP_SECONDS + 1;
+        l.sequence_number = 200; // > 0 + 120 (RATE_LIMIT_LEDGERS_DEFAULT)
+    });
+
+    // Second review — resets lockup anchor to current time.
+    setup_completed_job(&env, &escrow_id, 2u64, &reviewer, &reviewee2, &token_addr);
+    reputation_client.submit_review(
+        &escrow_id,
+        &reviewer,
+        &reviewee2,
+        &2u64,
+        &5u32,
+        &String::from_str(&env, "Also great"),
+        &MIN_STAKE,
+    );
+
+    // Attempting to claim immediately after the second review must fail even
+    // though the first lockup window has fully elapsed — the second review
+    // resets the lockup anchor to the current timestamp.
+    env.ledger().with_mut(|l| {
+        l.timestamp = 1000 + STAKE_LOCKUP_SECONDS + 2;
+    });
+    let result = reputation_client.try_claim_stake(&reviewer, &MIN_STAKE);
+    assert!(
+        result.is_err(),
+        "claim must be rejected while the second review's lockup is still active"
+    );
+}
+
+/// Stake-weight cap: a single review with a stake_weight far above
+/// MAX_STAKE_WEIGHT_PER_REVIEW must contribute no more than
+/// 5 * MAX_STAKE_WEIGHT_PER_REVIEW to total_score (at a 5-star rating).
+/// Before the fix, passing stake_weight = 1_000_000 * MIN_STAKE would have
+/// given governance weight proportional to that huge number.
+#[test]
+fn test_stake_weight_capped_per_review() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let escrow_id = env.register_contract(None, EscrowContract);
+    let reputation_id = env.register_contract(None, ReputationContract);
+    let reputation_client = ReputationContractClient::new(&env, &reputation_id);
+
+    let reviewer = Address::generate(&env);
+    let reviewee = Address::generate(&env);
+    let token_admin = Address::generate(&env);
+    let token_addr = create_token(&env, &token_admin);
+
+    // Mint a very large amount so the transfer itself succeeds.
+    // 100 * MAX_STAKE_WEIGHT_PER_REVIEW in raw token units, plus 100 for job funding.
+    let huge_stake: i128 = (MAX_STAKE_WEIGHT_PER_REVIEW as i128) * 100;
+    mint(&env, &token_addr, &token_admin, &reviewer, huge_stake + 100);
+
+    env.ledger().with_mut(|l| l.timestamp = 1000);
+    setup_completed_job(&env, &escrow_id, 1u64, &reviewer, &reviewee, &token_addr);
+
+    reputation_client.submit_review(
+        &escrow_id,
+        &reviewer,
+        &reviewee,
+        &1u64,
+        &5u32,
+        &String::from_str(&env, "Five stars"),
+        &huge_stake,
+    );
+
+    let (score, _) = reputation_client.get_gov_weight(&reviewee);
+
+    // With no cap the score would be 5 * 100 * MAX_STAKE_WEIGHT_PER_REVIEW.
+    // With the per-review cap it must be exactly 5 * MAX_STAKE_WEIGHT_PER_REVIEW.
+    let expected_capped = 5u64 * MAX_STAKE_WEIGHT_PER_REVIEW;
+    assert_eq!(
+        score, expected_capped,
+        "governance score must be capped at 5 * MAX_STAKE_WEIGHT_PER_REVIEW, got {score}"
+    );
+}
+
+/// Governance weight hard cap: even if 200 max-rated, max-staked reviews exist,
+/// the score returned by get_gov_weight must not exceed MAX_GOV_WEIGHT.
+#[test]
+fn test_get_gov_weight_capped_at_max() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.budget().reset_unlimited();
+
+    let reputation_id = env.register_contract(None, ReputationContract);
+    let client = ReputationContractClient::new(&env, &reputation_id);
+    let admin = Address::generate(&env);
+    client.initialize(&vec![&env, admin.clone()], &1u32, &0u32);
+
+    let user = Address::generate(&env);
+    let reviewer = Address::generate(&env);
+
+    // Inject 200 reviews each with MAX_STAKE_WEIGHT_PER_REVIEW and 5-star rating,
+    // which is exactly the legitimate ceiling. Also inject 1 extra review with a
+    // stake 10x the cap; capping must keep the total at MAX_GOV_WEIGHT.
+    env.as_contract(&reputation_id, || {
+        let mut reviews: Vec<Review> = Vec::new(&env);
+        for i in 0..200u64 {
+            reviews.push_back(Review {
+                reviewer: reviewer.clone(),
+                reviewee: user.clone(),
+                job_id: i,
+                rating: 5u32,
+                comment: String::from_str(&env, ""),
+                // 10x the per-review cap — read-path capping must bring this down.
+                stake_weight: (MAX_STAKE_WEIGHT_PER_REVIEW as i128) * 10,
+                timestamp: 0,
+            });
+        }
+        env.storage()
+            .persistent()
+            .set(&DataKey::Reviews(user.clone()), &reviews);
+        env.storage().persistent().set(
+            &DataKey::Reputation(user.clone()),
+            &UserReputation {
+                user: user.clone(),
+                total_score: 0,
+                total_weight: 0,
+                review_count: 200,
+                last_updated_ts: 0,
+            },
+        );
+    });
+
+    let (score, _ts) = client.get_gov_weight(&user);
+    assert_eq!(
+        score, MAX_GOV_WEIGHT,
+        "get_gov_weight must be capped at MAX_GOV_WEIGHT, got {score}"
+    );
+}
+
+/// Two-address Sybil exploit end-to-end:
+/// Attacker controls addr_a and addr_b, creates a completed job between them,
+/// each reviews the other with a massive stake_weight.
+/// Assert that get_gov_weight is capped rather than reflecting the raw
+/// inflated stake, AND that the stake cannot be reclaimed before the lockup.
+#[test]
+fn test_sybil_two_address_self_dealt_review_capped() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let escrow_id = env.register_contract(None, EscrowContract);
+    let reputation_id = env.register_contract(None, ReputationContract);
+    let reputation_client = ReputationContractClient::new(&env, &reputation_id);
+
+    // Attacker-controlled addresses.
+    let addr_a = Address::generate(&env);
+    let addr_b = Address::generate(&env);
+    let token_admin = Address::generate(&env);
+    let token_addr = create_token(&env, &token_admin);
+
+    // Mint enough for both to stake a huge amount, plus 100 each for job funding.
+    let huge_stake: i128 = (MAX_STAKE_WEIGHT_PER_REVIEW as i128) * 1_000;
+    mint(&env, &token_addr, &token_admin, &addr_a, huge_stake + 100);
+    mint(&env, &token_addr, &token_admin, &addr_b, huge_stake + 100);
+
+    env.ledger().with_mut(|l| l.timestamp = 1_000_000);
+
+    // Create a completed job between the two attacker addresses.
+    setup_completed_job(&env, &escrow_id, 1u64, &addr_a, &addr_b, &token_addr);
+
+    // addr_a (client) reviews addr_b (freelancer) with inflated stake.
+    reputation_client.submit_review(
+        &escrow_id,
+        &addr_a,
+        &addr_b,
+        &1u64,
+        &5u32,
+        &String::from_str(&env, "Sybil 5 stars"),
+        &huge_stake,
+    );
+
+    // addr_b (freelancer) reviews addr_a (client) with inflated stake.
+    setup_completed_job(&env, &escrow_id, 2u64, &addr_b, &addr_a, &token_addr);
+    reputation_client.submit_review(
+        &escrow_id,
+        &addr_b,
+        &addr_a,
+        &2u64,
+        &5u32,
+        &String::from_str(&env, "Sybil 5 stars back"),
+        &huge_stake,
+    );
+
+    // --- Assertion 1: governance weight is capped, NOT inflated ---
+    let (score_b, _) = reputation_client.get_gov_weight(&addr_b);
+    let (score_a, _) = reputation_client.get_gov_weight(&addr_a);
+    let expected_max_single = 5u64 * MAX_STAKE_WEIGHT_PER_REVIEW;
+    assert_eq!(
+        score_b, expected_max_single,
+        "addr_b gov weight must be capped at {expected_max_single}, got {score_b}"
+    );
+    assert_eq!(
+        score_a, expected_max_single,
+        "addr_a gov weight must be capped at {expected_max_single}, got {score_a}"
+    );
+
+    // --- Assertion 2: stake cannot be reclaimed immediately (flash-loan defence) ---
+    let result_a = reputation_client.try_claim_stake(&addr_a, &huge_stake);
+    assert!(
+        result_a.is_err(),
+        "addr_a must not be able to reclaim stake before lockup elapses"
+    );
+    let result_b = reputation_client.try_claim_stake(&addr_b, &huge_stake);
+    assert!(
+        result_b.is_err(),
+        "addr_b must not be able to reclaim stake before lockup elapses"
+    );
+
+    // --- Assertion 3: stake CAN be reclaimed after the lockup ---
+    env.ledger()
+        .with_mut(|l| l.timestamp = 1_000_000 + STAKE_LOCKUP_SECONDS + 1);
+    reputation_client.claim_stake(&addr_a, &huge_stake);
+    reputation_client.claim_stake(&addr_b, &huge_stake);
+    assert_eq!(reputation_client.get_stake_balance(&addr_a), 0);
+    assert_eq!(reputation_client.get_stake_balance(&addr_b), 0);
+}
+
+/// Legitimate high-stake reviewer: a normal MIN_STAKE review with a 5-star
+/// rating goes through uncapped (stake is below MAX_STAKE_WEIGHT_PER_REVIEW)
+/// and remains claimable after the lockup. Ensures the fix doesn't break
+/// the honest happy path.
+#[test]
+fn test_legitimate_review_and_claim_unaffected() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let escrow_id = env.register_contract(None, EscrowContract);
+    let reputation_id = env.register_contract(None, ReputationContract);
+    let reputation_client = ReputationContractClient::new(&env, &reputation_id);
+
+    let reviewer = Address::generate(&env);
+    let reviewee = Address::generate(&env);
+    let token_admin = Address::generate(&env);
+    let token_addr = create_token(&env, &token_admin);
+
+    mint(&env, &token_addr, &token_admin, &reviewer, 100_000_000);
+    env.ledger().with_mut(|l| l.timestamp = 5_000_000);
+    setup_completed_job(&env, &escrow_id, 1u64, &reviewer, &reviewee, &token_addr);
+
+    reputation_client.submit_review(
+        &escrow_id,
+        &reviewer,
+        &reviewee,
+        &1u64,
+        &5u32,
+        &String::from_str(&env, "Excellent"),
+        &MIN_STAKE,
+    );
+
+    // Reputation score = 5 * MIN_STAKE (well below both caps).
+    let (score, _) = reputation_client.get_gov_weight(&reviewee);
+    assert_eq!(
+        score,
+        5u64 * MIN_STAKE as u64,
+        "legitimate review score should equal 5 * MIN_STAKE"
+    );
+
+    // Claiming before lockup elapses is still rejected.
+    assert!(
+        reputation_client
+            .try_claim_stake(&reviewer, &MIN_STAKE)
+            .is_err(),
+        "claim must fail inside the lockup window"
+    );
+
+    // After lockup, claim succeeds.
+    env.ledger()
+        .with_mut(|l| l.timestamp = 5_000_000 + STAKE_LOCKUP_SECONDS + 1);
+    reputation_client.claim_stake(&reviewer, &MIN_STAKE);
+    assert_eq!(reputation_client.get_stake_balance(&reviewer), 0);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// #1173 — get_leaderboard_page pagination behaviour
+//
+// Only the zero-argument `get_leaderboard()` wrapper (offset=0, limit=50) was
+// exercised before, so offset/limit handling, clamping and out-of-range offsets
+// were untested. These tests drive `get_leaderboard_page` directly.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Write a leaderboard of `count` entries straight into instance storage,
+/// descending by rating (1000, 990, 980, …) exactly as `update_leaderboard`
+/// maintains it. Returns the addresses in leaderboard order.
+///
+/// Seeding directly keeps these tests focused on pagination arithmetic and lets
+/// them exceed the 50-entry limit cheaply; `test_leaderboard_page_offset_and_limit_
+/// with_real_reviews` covers the same code path on a leaderboard built by
+/// `submit_review`.
+fn seed_leaderboard(env: &Env, contract_id: &Address, count: u32) -> soroban_sdk::Vec<Address> {
+    let mut addresses = soroban_sdk::Vec::new(env);
+    let mut entries: soroban_sdk::Vec<(Address, u64)> = soroban_sdk::Vec::new(env);
+    for i in 0..count {
+        let addr = Address::generate(env);
+        addresses.push_back(addr.clone());
+        entries.push_back((addr, 1000u64 - (i as u64) * 10));
+    }
+    env.as_contract(contract_id, || {
+        env.storage().instance().set(&DataKey::Leaderboard, &entries);
+    });
+    addresses
+}
+
+#[test]
+fn test_leaderboard_page_first_page_matches_default_wrapper() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let contract_id = env.register_contract(None, ReputationContract);
+    let client = ReputationContractClient::new(&env, &contract_id);
+    seed_leaderboard(&env, &contract_id, 10);
+
+    // The wrapper is exactly get_leaderboard_page(0, 50).
+    assert_eq!(client.get_leaderboard_page(&0, &50), client.get_leaderboard());
+}
+
+#[test]
+fn test_leaderboard_page_non_zero_offset_returns_correct_slice() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let contract_id = env.register_contract(None, ReputationContract);
+    let client = ReputationContractClient::new(&env, &contract_id);
+    let addresses = seed_leaderboard(&env, &contract_id, 10);
+
+    let page = client.get_leaderboard_page(&3, &4);
+    assert_eq!(page.len(), 4);
+    for i in 0..4u32 {
+        let (addr, rating) = page.get(i).unwrap();
+        assert_eq!(addr, addresses.get(3 + i).unwrap(), "entry {i} is off by one");
+        assert_eq!(rating, 1000 - ((3 + i) as u64) * 10);
+    }
+
+    // Consecutive pages tile the list without gaps or repeats.
+    let first = client.get_leaderboard_page(&0, &5);
+    let second = client.get_leaderboard_page(&5, &5);
+    assert_eq!(first.len(), 5);
+    assert_eq!(second.len(), 5);
+    for i in 0..5u32 {
+        assert_eq!(first.get(i).unwrap().0, addresses.get(i).unwrap());
+        assert_eq!(second.get(i).unwrap().0, addresses.get(5 + i).unwrap());
+    }
+}
+
+#[test]
+fn test_leaderboard_page_custom_limit() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let contract_id = env.register_contract(None, ReputationContract);
+    let client = ReputationContractClient::new(&env, &contract_id);
+    let addresses = seed_leaderboard(&env, &contract_id, 10);
+
+    let page = client.get_leaderboard_page(&0, &1);
+    assert_eq!(page.len(), 1);
+    assert_eq!(page.get(0).unwrap().0, addresses.get(0).unwrap());
+
+    // A limit of zero is a legitimate (if useless) request: empty page, no panic.
+    assert_eq!(client.get_leaderboard_page(&0, &0).len(), 0);
+
+    // A limit larger than what remains is truncated at the end of the list.
+    let tail = client.get_leaderboard_page(&8, &10);
+    assert_eq!(tail.len(), 2);
+    assert_eq!(tail.get(0).unwrap().0, addresses.get(8).unwrap());
+    assert_eq!(tail.get(1).unwrap().0, addresses.get(9).unwrap());
+}
+
+#[test]
+fn test_leaderboard_page_limit_is_clamped_to_fifty() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let contract_id = env.register_contract(None, ReputationContract);
+    let client = ReputationContractClient::new(&env, &contract_id);
+    let addresses = seed_leaderboard(&env, &contract_id, 60);
+
+    // Anything above the 50 maximum yields exactly 50 entries, including u32::MAX
+    // (which would overflow offset + limit without the saturating add).
+    assert_eq!(client.get_leaderboard_page(&0, &51).len(), 50);
+    assert_eq!(client.get_leaderboard_page(&0, &1000).len(), 50);
+    assert_eq!(client.get_leaderboard_page(&0, &u32::MAX).len(), 50);
+
+    // Clamping applies from the offset, not from the start of the list.
+    let page = client.get_leaderboard_page(&5, &u32::MAX);
+    assert_eq!(page.len(), 50);
+    assert_eq!(page.get(0).unwrap().0, addresses.get(5).unwrap());
+    assert_eq!(page.get(49).unwrap().0, addresses.get(54).unwrap());
+}
+
+#[test]
+fn test_leaderboard_page_out_of_range_offset_is_empty() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let contract_id = env.register_contract(None, ReputationContract);
+    let client = ReputationContractClient::new(&env, &contract_id);
+    seed_leaderboard(&env, &contract_id, 10);
+
+    // offset == total and beyond: empty, never a panic.
+    assert_eq!(client.get_leaderboard_page(&10, &5).len(), 0);
+    assert_eq!(client.get_leaderboard_page(&11, &5).len(), 0);
+    assert_eq!(client.get_leaderboard_page(&u32::MAX, &5).len(), 0);
+
+    // Last valid offset still returns a single entry.
+    assert_eq!(client.get_leaderboard_page(&9, &5).len(), 1);
+}
+
+#[test]
+fn test_leaderboard_page_empty_leaderboard_is_empty_at_any_offset() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let contract_id = env.register_contract(None, ReputationContract);
+    let client = ReputationContractClient::new(&env, &contract_id);
+
+    // No leaderboard entry has ever been written.
+    assert_eq!(client.get_leaderboard_page(&0, &50).len(), 0);
+    assert_eq!(client.get_leaderboard_page(&7, &50).len(), 0);
+}
+
+#[test]
+fn test_leaderboard_page_offset_applies_after_banned_users_are_filtered() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let contract_id = env.register_contract(None, ReputationContract);
+    let client = ReputationContractClient::new(&env, &contract_id);
+    let admin = Address::generate(&env);
+    client.initialize(&vec![&env, admin.clone()], &1u32, &0u32);
+    let addresses = seed_leaderboard(&env, &contract_id, 5);
+
+    // Ban the top-ranked user: paging must index into the filtered list, so
+    // offset 0 is now the second-ranked user and the last offset falls away.
+    client.ban_user(&admin, &addresses.get(0).unwrap());
+
+    let page = client.get_leaderboard_page(&0, &50);
+    assert_eq!(page.len(), 4);
+    assert_eq!(page.get(0).unwrap().0, addresses.get(1).unwrap());
+
+    let page = client.get_leaderboard_page(&3, &50);
+    assert_eq!(page.len(), 1);
+    assert_eq!(page.get(0).unwrap().0, addresses.get(4).unwrap());
+
+    assert_eq!(client.get_leaderboard_page(&4, &50).len(), 0);
+}
+
+#[test]
+fn test_leaderboard_page_offset_and_limit_with_real_reviews() {
+    let env = setup_high_ttl_env();
+    env.mock_all_auths();
+    let escrow_id = env.register_contract(None, EscrowContract);
+    let reputation_id = env.register_contract(None, ReputationContract);
+    let client = ReputationContractClient::new(&env, &reputation_id);
+    let admin = Address::generate(&env);
+    client.initialize(&vec![&env, admin.clone()], &1u32, &0u32);
+
+    // Three reviewees with distinct ratings, so leaderboard order is deterministic.
+    let mut reviewees = soroban_sdk::Vec::new(&env);
+    for (i, rating) in [5u32, 4u32, 3u32].iter().enumerate() {
+        let reviewer = Address::generate(&env);
+        let reviewee = Address::generate(&env);
+        setup_review_for(
+            &env,
+            &escrow_id,
+            &client,
+            i as u64 + 1,
+            &reviewer,
+            &reviewee,
+            *rating,
+        );
+        reviewees.push_back(reviewee);
+    }
+
+    let full = client.get_leaderboard_page(&0, &50);
+    assert_eq!(full.len(), 3);
+
+    // Paging through a leaderboard built by submit_review returns the same
+    // entries in the same order as the unpaginated read.
+    let middle = client.get_leaderboard_page(&1, &1);
+    assert_eq!(middle.len(), 1);
+    assert_eq!(middle.get(0).unwrap(), full.get(1).unwrap());
+
+    let last_two = client.get_leaderboard_page(&1, &10);
+    assert_eq!(last_two.len(), 2);
+    assert_eq!(last_two.get(0).unwrap(), full.get(1).unwrap());
+    assert_eq!(last_two.get(1).unwrap(), full.get(2).unwrap());
+
+    assert_eq!(client.get_leaderboard_page(&3, &10).len(), 0);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// #1174 — get_effective_weight decay coverage
+//
+// `get_effective_weight` implements its own decay formula, independent of
+// `get_decayed_totals`, and had no test coverage at all. These pin the formula
+// across its whole range and cross-check it against `get_decayed_totals` so the
+// two cannot silently diverge.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// A review recorded at `timestamp` carrying `stake_weight`.
+fn review_at(env: &Env, stake_weight: i128, timestamp: u64) -> Review {
+    Review {
+        reviewer: Address::generate(env),
+        reviewee: Address::generate(env),
+        job_id: 1,
+        rating: 5,
+        comment: String::from_str(env, "ok"),
+        stake_weight,
+        timestamp,
+    }
+}
+
+/// Register a reputation contract configured with `decay_rate`% annual decay;
+/// `get_effective_weight` reads the rate from instance storage.
+fn effective_weight_client<'a>(env: &'a Env, decay_rate: u32) -> ReputationContractClient<'a> {
+    let contract_id = env.register_contract(None, ReputationContract);
+    let client = ReputationContractClient::new(env, &contract_id);
+    let admin = Address::generate(env);
+    client.initialize(&vec![env, admin], &1u32, &decay_rate);
+    client
+}
+
+#[test]
+fn test_effective_weight_fresh_review_keeps_full_weight() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let client = effective_weight_client(&env, 10);
+
+    // Zero elapsed time -> decay factor 100% -> full stake weight.
+    let review = review_at(&env, 1_000_i128, 0);
+    assert_eq!(client.get_effective_weight(&review, &0), 1_000);
+
+    // Still effectively fresh well inside the first year: 10% * 0.1yr = 1% off.
+    let tenth_of_a_year = ONE_YEAR_IN_SECONDS / 10;
+    assert_eq!(
+        client.get_effective_weight(&review, &tenth_of_a_year),
+        990,
+        "10%/yr for a tenth of a year should shave exactly 1%"
+    );
+}
+
+#[test]
+fn test_effective_weight_zero_decay_rate_never_decays() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let client = effective_weight_client(&env, 0);
+
+    let review = review_at(&env, 1_000_i128, 0);
+    assert_eq!(client.get_effective_weight(&review, &0), 1_000);
+    assert_eq!(
+        client.get_effective_weight(&review, &(ONE_YEAR_IN_SECONDS * 100)),
+        1_000,
+        "with decay disabled, age must not matter"
+    );
+}
+
+#[test]
+fn test_effective_weight_partial_decay_is_linear_in_age() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let client = effective_weight_client(&env, 10); // 10% per year
+
+    let review = review_at(&env, 1_000_i128, 0);
+
+    // Retained = 100 - 10 * years.
+    assert_eq!(client.get_effective_weight(&review, &ONE_YEAR_IN_SECONDS), 900);
+    assert_eq!(
+        client.get_effective_weight(&review, &(ONE_YEAR_IN_SECONDS * 3)),
+        700
+    );
+    assert_eq!(
+        client.get_effective_weight(&review, &(ONE_YEAR_IN_SECONDS * 5)),
+        500
+    );
+    assert_eq!(
+        client.get_effective_weight(&review, &(ONE_YEAR_IN_SECONDS * 9)),
+        100
+    );
+
+    // Age is measured from the review's own timestamp, not from epoch.
+    let later = review_at(&env, 1_000_i128, ONE_YEAR_IN_SECONDS * 4);
+    assert_eq!(
+        client.get_effective_weight(&later, &(ONE_YEAR_IN_SECONDS * 9)),
+        500,
+        "a 5-year-old review must decay like any other 5-year-old review"
+    );
+}
+
+#[test]
+fn test_effective_weight_fully_decayed_is_zero_and_saturates() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let client = effective_weight_client(&env, 10); // 10% per year
+
+    let review = review_at(&env, 1_000_i128, 0);
+
+    // Exactly 10 years: retained 0%.
+    assert_eq!(
+        client.get_effective_weight(&review, &(ONE_YEAR_IN_SECONDS * 10)),
+        0
+    );
+    // Beyond full decay the factor saturates at 0 rather than wrapping.
+    assert_eq!(
+        client.get_effective_weight(&review, &(ONE_YEAR_IN_SECONDS * 50)),
+        0
+    );
+    assert_eq!(client.get_effective_weight(&review, &u64::MAX), 0);
+}
+
+#[test]
+fn test_effective_weight_future_timestamp_is_not_negative_decay() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let client = effective_weight_client(&env, 10);
+
+    // current_time before the review's timestamp: age saturates to 0, so the
+    // weight is full — never inflated above the staked amount.
+    let review = review_at(&env, 1_000_i128, ONE_YEAR_IN_SECONDS * 5);
+    assert_eq!(client.get_effective_weight(&review, &0), 1_000);
+}
+
+#[test]
+fn test_effective_weight_non_positive_stake_uses_weight_of_one() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let client = effective_weight_client(&env, 10);
+
+    // A review carrying no stake still counts as weight 1 when fresh.
+    let unstaked = review_at(&env, 0_i128, 0);
+    assert_eq!(client.get_effective_weight(&unstaked, &0), 1);
+
+    // ...and that single unit decays away to nothing (integer division).
+    assert_eq!(
+        client.get_effective_weight(&unstaked, &(ONE_YEAR_IN_SECONDS * 5)),
+        0
+    );
+
+    // A negative stake weight is treated the same as zero, never negatively.
+    let negative = review_at(&env, -50_i128, 0);
+    assert_eq!(client.get_effective_weight(&negative, &0), 1);
+}
+
+#[test]
+fn test_effective_weight_agrees_with_get_decayed_totals() {
+    let env = setup_high_ttl_env();
+    env.mock_all_auths();
+    let escrow_id = env.register_contract(None, EscrowContract);
+    let reputation_id = env.register_contract(None, ReputationContract);
+    let client = ReputationContractClient::new(&env, &reputation_id);
+    let admin = Address::generate(&env);
+    client.initialize(&vec![&env, admin.clone()], &1u32, &10u32); // 10%/yr
+
+    let reviewer = Address::generate(&env);
+    let reviewee = Address::generate(&env);
+    setup_review_for(&env, &escrow_id, &client, 1, &reviewer, &reviewee, 5);
+
+    let review = client.get_reviews(&reviewee).get(0).unwrap();
+
+    // The two independently-implemented decay formulas must agree: with a single
+    // review, the reputation's decayed total_weight is that review's effective
+    // weight, both when fresh and part-way through the decay range.
+    let now = env.ledger().timestamp();
+    assert_eq!(
+        client.get_effective_weight(&review, &now) as u64,
+        client.get_reputation(&reviewee).total_weight
+    );
+
+    advance_n_periods(&env, 5); // 5 years -> 50% retained
+    let now = env.ledger().timestamp();
+    let effective = client.get_effective_weight(&review, &now);
+    assert_eq!(effective as u64, client.get_reputation(&reviewee).total_weight);
+    assert_eq!(effective, review.stake_weight / 2);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// #1433 — `referral_reward` must carry the referee its legacy sibling carries
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Decode the first `reput`/`topic` event in the log into `T`.
+///
+/// Mirrors the ad-hoc decoding already used by the `tiers_set` and `tier_up`
+/// tests: event data is a serialized Rust value, so it round-trips back through
+/// `TryFromVal` when the test knows the published type.
+fn decode_reput_event<T: soroban_sdk::TryFromVal<Env, soroban_sdk::Val>>(
+    env: &Env,
+    topic: Symbol,
+) -> Option<T> {
+    env.events()
+        .all()
+        .iter()
+        .find(|(_, topics, _)| topics_match(env, topics, symbol_short!("reput"), topic.clone()))
+        .and_then(|(_, _, data)| T::try_from_val(env, &data).ok())
+}
+
+#[test]
+fn test_referral_reward_event_carries_referee() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let escrow_id = env.register_contract(None, EscrowContract);
+    let reputation_id = env.register_contract(None, ReputationContract);
+    let client = ReputationContractClient::new(&env, &reputation_id);
+
+    let admin = Address::generate(&env);
+    client.initialize(&vec![&env, admin], &1u32, &0u32);
+
+    let referrer = Address::generate(&env);
+    let job_client = Address::generate(&env);
+    let freelancer = Address::generate(&env);
+    let token_admin = Address::generate(&env);
+    let token_addr = create_token(&env, &token_admin);
+    mint(&env, &token_addr, &token_admin, &job_client, 100_000_000);
+
+    client.register_referral(&freelancer, &referrer);
+    setup_completed_job(&env, &escrow_id, 1u64, &job_client, &freelancer, &token_addr);
+    client.submit_review(
+        &escrow_id,
+        &job_client,
+        &freelancer,
+        &1u64,
+        &5u32,
+        &String::from_str(&env, "Good job"),
+        &MIN_STAKE,
+    );
+
+    // The descriptive `referral_reward` event must expose the same three fields
+    // as the legacy `ref_rwrd` event, including the referee whose activity
+    // triggered the payout. Dropping `user` left indexers that migrated to this
+    // topic unable to attribute the bonus to a referee.
+    let legacy: (Address, u64, Address) =
+        decode_reput_event(&env, symbol_short!("ref_rwrd")).expect("legacy ref_rwrd event");
+    let descriptive: (Address, u64, Address) =
+        decode_reput_event(&env, Symbol::new(&env, "referral_reward")).expect("referral_reward event");
+
+    assert_eq!(legacy, (referrer.clone(), 5u64, freelancer.clone()));
+    assert_eq!(descriptive, legacy);
+}
+
+#[test]
+fn test_referral_reward_event_absent_when_no_referrer() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let escrow_id = env.register_contract(None, EscrowContract);
+    let reputation_id = env.register_contract(None, ReputationContract);
+    let client = ReputationContractClient::new(&env, &reputation_id);
+
+    let admin = Address::generate(&env);
+    client.initialize(&vec![&env, admin], &1u32, &0u32);
+
+    let job_client = Address::generate(&env);
+    let freelancer = Address::generate(&env);
+    let token_admin = Address::generate(&env);
+    let token_addr = create_token(&env, &token_admin);
+    mint(&env, &token_addr, &token_admin, &job_client, 100_000_000);
+
+    // No referral registered, so `process_referral_bonus` is a no-op and neither
+    // event is published. Guards against a padded/empty event sneaking in.
+    setup_completed_job(&env, &escrow_id, 1u64, &job_client, &freelancer, &token_addr);
+    client.submit_review(
+        &escrow_id,
+        &job_client,
+        &freelancer,
+        &1u64,
+        &5u32,
+        &String::from_str(&env, "Good job"),
+        &MIN_STAKE,
+    );
+
+    assert!(decode_referral_reward_count(&env) == 0);
+}
+
+fn decode_referral_reward_count(env: &Env) -> usize {
+    env.events()
+        .all()
+        .iter()
+        .filter(|(_, topics, _)| {
+            topics_match(
+                env,
+                topics,
+                symbol_short!("reput"),
+                Symbol::new(env, "referral_reward"),
+            )
+        })
+        .count()
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// #1434 — proposal lookups report `ProposalNotFound`, not `NotAdmin`
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[test]
+fn test_approve_admin_action_unknown_proposal_reports_proposal_not_found() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let reputation_id = env.register_contract(None, ReputationContract);
+    let client = ReputationContractClient::new(&env, &reputation_id);
+
+    let signer = Address::generate(&env);
+    // 2-of-2 so that proposing leaves the proposal pending rather than
+    // executing it inline via the `threshold == 1` shortcut.
+    let signer2 = Address::generate(&env);
+    client.initialize(&vec![&env, signer.clone(), signer2], &2, &0);
+
+    // A genuine signer passing a stale/wrong id is a lookup failure, not an
+    // authorization failure.
+    assert_eq!(
+        client.try_approve_admin_action(&signer, &9_999),
+        Err(Ok(ReputationError::ProposalNotFound))
+    );
+}
+
+#[test]
+fn test_approve_admin_action_unknown_proposal_by_non_signer_still_reports_not_admin() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let reputation_id = env.register_contract(None, ReputationContract);
+    let client = ReputationContractClient::new(&env, &reputation_id);
+
+    let signer = Address::generate(&env);
+    let signer2 = Address::generate(&env);
+    client.initialize(&vec![&env, signer.clone(), signer2], &2, &0);
+
+    // The authorization check still runs first and is unchanged: a non-signer
+    // gets `NotAdmin` whether or not the proposal id exists.
+    let outsider = Address::generate(&env);
+    assert_eq!(
+        client.try_approve_admin_action(&outsider, &9_999),
+        Err(Ok(ReputationError::NotAdmin))
+    );
+}
+
+#[test]
+fn test_approve_admin_action_proposal_0_after_execution_reports_proposal_not_found() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let reputation_id = env.register_contract(None, ReputationContract);
+    let client = ReputationContractClient::new(&env, &reputation_id);
+
+    let signer1 = Address::generate(&env);
+    let signer2 = Address::generate(&env);
+    client.initialize(&vec![&env, signer1.clone(), signer2.clone()], &2, &0);
+
+    let prop_id = client.propose_admin_action(&signer1, &AdminAction::Pause);
+    assert_eq!(prop_id, 1);
+    client.approve_admin_action(&signer2, &prop_id);
+
+    // Proposing does not retire the proposal record, so re-approving the
+    // already-executed id still hits the "already executed" branch rather than
+    // the not-found branch.
+    assert_eq!(
+        client.try_approve_admin_action(&signer1, &prop_id),
+        Err(Ok(ReputationError::Unauthorized))
+    );
 }

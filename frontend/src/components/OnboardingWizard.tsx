@@ -5,6 +5,7 @@ import { X, ChevronRight, Briefcase, Search, User, CheckCircle2, Loader2, Wallet
 import axios from "axios";
 import Link from "next/link";
 import { useAuth } from "@/context/AuthContext";
+import { useWallet } from "@/context/WalletContext";
 import { useFocusTrap } from "@/hooks/useFocusTrap";
 
 const API = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:5000/api/v1";
@@ -142,38 +143,63 @@ function StepWallet({
   setWalletAddress,
 }: StepProps & { walletAddress: string | null; setWalletAddress: (a: string | null) => void }) {
   const [state, setState] = useState<WalletState>("idle");
+  const [linkError, setLinkError] = useState<string | null>(null);
   const { token, updateUser } = useAuth();
+  const { connect, bindWallet, address: walletContextAddress, isFreighterInstalled } = useWallet();
+
+  // Sync WalletContext address into local state when it changes (e.g. after
+  // connecting via the shared connect() flow).
+  useEffect(() => {
+    if (walletContextAddress && state === "connecting") {
+      setWalletAddress(walletContextAddress);
+      setState("connected");
+    }
+  }, [walletContextAddress, state, setWalletAddress]);
 
   const handleConnect = useCallback(async () => {
-    // Detect Freighter via the injected window global
-    const freighter = (window as unknown as { freighter?: { requestAccess: () => Promise<string> } }).freighter;
-    if (!freighter) {
+    if (isFreighterInstalled === false) {
       setState("not_installed");
       return;
     }
 
     setState("connecting");
+    setLinkError(null);
     try {
-      const publicKey = await freighter.requestAccess();
+      // Delegate to the shared WalletContext connect flow so the navbar and
+      // every other consumer stay in sync automatically.
+      const publicKey = await connect("freighter");
+      if (!publicKey) {
+        // User cancelled or Freighter not available
+        setState("idle");
+        return;
+      }
+
+      if (!token) {
+        setState("idle");
+        return;
+      }
+
+      // Bind via the signed challenge/verify flow — the same one Settings
+      // uses — rather than just writing the address, so the server actually
+      // has proof this account controls the key before treating it as linked.
+      const result = await bindWallet(token);
+      if (!result.success) {
+        setLinkError(result.error ?? "Failed to link wallet.");
+        setState("idle");
+        return;
+      }
+      if (result.token) {
+        localStorage.setItem("stellarmarket_jwt", result.token);
+      }
+
       setWalletAddress(publicKey);
       setState("connected");
-
-      // Persist wallet address to user profile
-      try {
-        await axios.patch(
-          `${API}/users/me`,
-          { walletAddress: publicKey },
-          { headers: { Authorization: `Bearer ${token}` } },
-        );
-        updateUser({ walletAddress: publicKey });
-      } catch {
-        // Profile update failure is non-blocking — key is stored in local state
-      }
+      updateUser({ walletAddress: publicKey });
     } catch {
       // User rejected or error occurred
       setState("idle");
     }
-  }, [token, updateUser, setWalletAddress]);
+  }, [connect, bindWallet, isFreighterInstalled, token, updateUser, setWalletAddress]);
 
   const truncate = (addr: string) => `${addr.slice(0, 6)}…${addr.slice(-4)}`;
 
@@ -199,6 +225,12 @@ function StepWallet({
           >
             Get Freighter <ExternalLink size={12} />
           </a>
+        </div>
+      )}
+
+      {linkError && (
+        <div className="rounded-lg bg-theme-error/10 border border-theme-error/30 p-3 mb-4 text-sm text-theme-error">
+          {linkError}
         </div>
       )}
 
@@ -309,8 +341,6 @@ export default function OnboardingWizard() {
     setOpen(false);
     await markComplete();
   }, [markComplete]);
-
-  useFocusTrap(modalRef, { open, onClose: handleSkip });
 
   useFocusTrap(modalRef, { open, onClose: handleSkip });
 

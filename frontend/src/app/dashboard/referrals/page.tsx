@@ -22,13 +22,17 @@ interface ReferralStats {
 }
 
 export default function ReferralsPage() {
-  const { token } = useAuth();
+  const { token, isLoading: authLoading } = useAuth();
   const [stats, setStats] = useState<ReferralStats | null>(null);
   const [loading, setLoading] = useState(true);
   const [copied, setCopied] = useState(false);
 
   const fetchStats = useCallback(async () => {
-    if (!token) return;
+    if (!token) {
+      setLoading(false);
+      return;
+    }
+    setLoading(true);
     try {
       const res = await axios.get<ReferralStats>(`${API}/referrals/stats`, {
         headers: { Authorization: `Bearer ${token}` },
@@ -42,8 +46,10 @@ export default function ReferralsPage() {
   }, [token]);
 
   useEffect(() => {
-    void fetchStats();
-  }, [fetchStats]);
+    if (!authLoading) {
+      void fetchStats();
+    }
+  }, [authLoading, fetchStats]);
 
   const referralLink =
     typeof window !== "undefined" && stats?.referralCode
@@ -57,7 +63,7 @@ export default function ReferralsPage() {
     setTimeout(() => setCopied(false), 2000);
   };
 
-  if (loading) {
+  if (authLoading || loading) {
     return (
       <div className="flex items-center justify-center min-h-[60vh]">
         <Loader2 className="animate-spin text-stellar-blue" size={40} />

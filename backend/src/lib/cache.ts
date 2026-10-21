@@ -72,11 +72,36 @@ export async function invalidateCache(pattern: string): Promise<void> {
     }
 
     const redis = RedisClient.getInstance();
-    const keys = await redis.keys(pattern);
-    
-    if (keys.length > 0) {
-      await redis.del(...keys);
-      logger.debug({ count: keys.length, pattern }, "Invalidated cache keys");
+
+    // SCAN replaces KEYS so we never block Redis's single-threaded event loop.
+    // scanStream yields keys in cursor-sized batches (non-blocking per batch).
+    // Each batch is deleted via its own pipeline to avoid accumulating a massive
+    // in-memory pipeline for patterns matching many keys.
+    let totalCount = 0;
+
+    await new Promise<void>((resolve, reject) => {
+      const stream = redis.scanStream({ match: pattern, count: 100 });
+      stream.on("data", async (keys: string[]) => {
+        if (keys.length === 0) return;
+
+        const pipeline = redis.pipeline();
+        for (const key of keys) {
+          pipeline.del(key);
+        }
+        totalCount += keys.length;
+
+        try {
+          await pipeline.exec();
+        } catch (error) {
+          reject(error);
+        }
+      });
+      stream.on("end", resolve);
+      stream.on("error", reject);
+    });
+
+    if (totalCount > 0) {
+      logger.debug({ count: totalCount, pattern }, "Invalidated cache keys");
     }
   } catch (error) {
     logger.warn({ err: error, pattern }, "Cache invalidation error");

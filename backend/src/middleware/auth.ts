@@ -78,7 +78,10 @@ export const authenticate = async (
       return;
     }
 
-    // Check if email verification is required for this route
+    // Check if email verification is required for this route.
+    // req.path is relative to this router's mount point (Express strips the
+    // "/auth" prefix by the time this middleware runs), so req.baseUrl must be
+    // prepended to recover the full request path for matching.
     const exemptRoutes = [
       "/auth/send-verification",
       "/auth/verify-email",
@@ -90,7 +93,19 @@ export const authenticate = async (
       "/auth/logout",
     ];
 
-    const isExempt = exemptRoutes.some((route) => req.path.includes(route));
+    const currentPath = `${req.baseUrl}${req.path}` || "";
+    // A route is exempt only on an exact match or a "/"-bounded prefix match
+    // (for sub-paths like verify-email/:token) — a plain startsWith would also
+    // match an unrelated route that merely begins with the same characters,
+    // e.g. "/auth/send-verification-evil".
+    const matchesRoute = (candidate: string, route: string) =>
+      candidate === route || candidate.startsWith(`${route}/`);
+    const isExempt = exemptRoutes.some(
+      (route) =>
+        matchesRoute(currentPath, route) ||
+        matchesRoute(currentPath, `/api${route}`) ||
+        matchesRoute(currentPath, `/api/v1${route}`),
+    );
 
     if (!isExempt && !user.emailVerified) {
       res.status(403).json({
@@ -127,8 +142,15 @@ export const requireAdmin = async (
   try {
     const decoded = jwt.verify(token, config.jwtSecret) as {
       userId: string;
+      purpose?: string;
       tokenVersion?: number;
     };
+
+    if (decoded.purpose === "2fa_pending") {
+      res.status(401).json({ error: "2FA verification required." });
+      return;
+    }
+
     req.userId = decoded.userId;
 
     // Reject tokens invalidated by a password change (#787).

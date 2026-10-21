@@ -6,6 +6,10 @@ import EvidenceViewer from "@/components/EvidenceViewer";
 jest.mock("axios", () => ({ get: jest.fn() }));
 const mockGet = axios.get as jest.Mock;
 
+jest.mock("@/components/Toast", () => ({
+  useToast: () => ({ toast: { success: jest.fn(), error: jest.fn() } }),
+}));
+
 describe("EvidenceViewer", () => {
   beforeEach(() => {
     localStorage.setItem("token", "test-token");

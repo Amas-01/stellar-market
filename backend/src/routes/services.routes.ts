@@ -43,10 +43,10 @@ router.get(
       where.category = { equals: category, mode: "insensitive" };
     }
 
-    if (minPrice || maxPrice) {
+    if (minPrice !== undefined || maxPrice !== undefined) {
       where.price = {};
-      if (minPrice) where.price.gte = minPrice;
-      if (maxPrice) where.price.lte = maxPrice;
+      if (minPrice !== undefined) where.price.gte = minPrice;
+      if (maxPrice !== undefined) where.price.lte = maxPrice;
     }
 
     if (freelancerId) {

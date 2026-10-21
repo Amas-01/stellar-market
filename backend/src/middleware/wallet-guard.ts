@@ -1,6 +1,7 @@
 import { Response, NextFunction } from "express";
 import { PrismaClient } from "@prisma/client";
 import { AuthRequest } from "./auth";
+import { logger } from "../lib/logger";
 
 const prisma = new PrismaClient();
 
@@ -46,7 +47,11 @@ export const walletSourceGuard = async (
     }
 
     next();
-  } catch {
+  } catch (err) {
+    logger.error(
+      { err, userId: req.userId, requestId: req.requestId },
+      "walletSourceGuard database error"
+    );
     res.status(500).json({ error: "Internal server error." });
   }
 };

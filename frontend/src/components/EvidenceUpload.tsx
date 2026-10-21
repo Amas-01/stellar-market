@@ -22,6 +22,7 @@ import {
   MAX_FILES,
   MAX_FILE_SIZE_BYTES,
   MAX_FILE_SIZE_MB,
+  ACCEPTED_EVIDENCE_MIME_TYPES,
   FileUploadState,
 } from "@/lib/evidenceUpload";
 import { CHUNK_SIZE } from "@/lib/evidenceUpload";
@@ -134,6 +135,13 @@ export default function EvidenceUpload({
         rejected = true;
         continue;
       }
+      if (!ACCEPTED_EVIDENCE_MIME_TYPES.includes(file.type)) {
+        setFileError(
+          `"${file.name}" is not a supported evidence type. Please attach images, PDFs, or videos.`,
+        );
+        rejected = true;
+        continue;
+      }
       const id = newFileId();
       nextSelected.set(id, file);
       nextStates.push(initState(id, file));
@@ -221,7 +229,7 @@ export default function EvidenceUpload({
       try {
         const { sessionId } = await uploadFileResumable(
           API_URL,
-          localStorage.getItem("token"),
+          localStorage.getItem("stellarmarket_jwt"),
           disputeId,
           file,
           state.id,
@@ -248,25 +256,32 @@ export default function EvidenceUpload({
         // the last chunk. IDB writes are deferred because fake-indexeddb (and the
         // app's IDB connection) share the microtask queue with the fetch loop and
         // would otherwise deadlock mid-upload.
-        setTimeout(() => {
-          void persistUpload({
-            disputeId,
-            fileId: state.id,
-            name: state.name,
-            size: state.size,
-            mimeType: state.mimeType,
-            sha256,
-            sessionId,
-            totalChunks: state.totalChunks,
-            uploadedChunks: state.uploadedChunks,
-            anchorTxHash: state.anchorTxHash,
-            blob: file,
-          }).catch(() => undefined);
-        }, 0);
+        // Chain persist then remove to avoid race condition (#1648)
         updateFile(state.id, { status: "done", progress: 100, sessionId });
-        setTimeout(() => {
-          void removePersistedUpload(disputeId, state.id).catch(() => undefined);
-        }, 0);
+        void (async () => {
+          try {
+            await persistUpload({
+              disputeId,
+              fileId: state.id,
+              name: state.name,
+              size: state.size,
+              mimeType: state.mimeType,
+              sha256,
+              sessionId,
+              totalChunks: state.totalChunks,
+              uploadedChunks: state.uploadedChunks,
+              anchorTxHash: state.anchorTxHash,
+              blob: file,
+            });
+          } catch {
+            // Ignore persist errors
+          }
+          try {
+            await removePersistedUpload(disputeId, state.id);
+          } catch {
+            // Ignore remove errors
+          }
+        })();
       } catch (err) {
         const message =
           err instanceof Error ? err.message : "Upload failed. Retry.";
@@ -325,6 +340,7 @@ export default function EvidenceUpload({
         ref={fileInputRef}
         type="file"
         multiple
+        accept={ACCEPTED_EVIDENCE_MIME_TYPES.join(",")}
         className="hidden"
         onChange={handleFileChange}
         disabled={disabled || isProcessing}

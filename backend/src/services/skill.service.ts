@@ -8,16 +8,19 @@ export interface SkillSuggestion {
   category: string | null;
 }
 
+const EMPTY_QUERY_MAX_LIMIT = 100;
+
 /**
  * Up to `limit` canonical skills whose name contains `query` (case-insensitive).
+ * An empty query lists the first skills alphabetically, capped at `limit` (max 100).
  * Backs the profile-page autocomplete combobox.
  */
-export async function searchSkills(query: string, limit = 10): Promise<SkillSuggestion[]> {
+export async function searchSkills(query: string, limit?: number): Promise<SkillSuggestion[]> {
   const trimmed = query.trim();
   if (!trimmed) {
     return prisma.skill.findMany({
       orderBy: { name: "asc" },
-      take: 100,
+      take: Math.min(limit ?? EMPTY_QUERY_MAX_LIMIT, EMPTY_QUERY_MAX_LIMIT),
       select: { id: true, name: true, category: true },
     });
   }
@@ -25,7 +28,7 @@ export async function searchSkills(query: string, limit = 10): Promise<SkillSugg
   return prisma.skill.findMany({
     where: { name: { contains: trimmed, mode: "insensitive" } },
     orderBy: { name: "asc" },
-    take: limit,
+    take: limit ?? 10,
     select: { id: true, name: true, category: true },
   });
 }

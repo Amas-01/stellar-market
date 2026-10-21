@@ -89,7 +89,12 @@ jest.mock("../config", () => ({
   },
 }));
 
-import { checkEscrowTtls } from "../jobs/escrow-ttl.job";
+import {
+  checkEscrowTtls,
+  WARNING_THRESHOLD_DAYS,
+  AUTO_EXTEND_THRESHOLD_DAYS,
+  DUPLICATE_ALERT_WINDOW_MS,
+} from "../jobs/escrow-ttl.job";
 
 describe("checkEscrowTtls job", () => {
   beforeEach(() => {
@@ -175,5 +180,69 @@ describe("checkEscrowTtls job", () => {
 
     expect(mockSendNotification).toHaveBeenCalled();
     expect(mockSendTransaction).toHaveBeenCalled();
+  });
+});
+
+// Issue #1411: the thresholds and the dedup window are named constants; the
+// behaviour they encode must stay exactly what the literals used to be.
+describe("checkEscrowTtls thresholds", () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+  });
+
+  it("keeps the historical thresholds and dedup window", () => {
+    expect(WARNING_THRESHOLD_DAYS).toBe(14);
+    expect(AUTO_EXTEND_THRESHOLD_DAYS).toBe(7);
+    expect(DUPLICATE_ALERT_WINDOW_MS).toBe(24 * 60 * 60 * 1000);
+  });
+
+  it("looks back exactly one dedup window for earlier warnings", async () => {
+    mockJobFindMany.mockResolvedValue([
+      { id: "job-1", title: "Test Job 1", contractJobId: "1", clientId: "client-1" },
+    ]);
+    mockGetEscrowTtl.mockResolvedValue({
+      daysRemaining: WARNING_THRESHOLD_DAYS - 1,
+      currentLedger: 100,
+      expiryLedger: 207460,
+    });
+    mockNotificationFindMany.mockResolvedValue([]);
+
+    const before = Date.now();
+    await checkEscrowTtls();
+    const after = Date.now();
+
+    expect(mockNotificationFindMany).toHaveBeenCalledTimes(1);
+    const args = mockNotificationFindMany.mock.calls[0][0] as {
+      where: { createdAt: { gte: Date } };
+    };
+    const since = args.where.createdAt.gte.getTime();
+    expect(since).toBeGreaterThanOrEqual(before - DUPLICATE_ALERT_WINDOW_MS);
+    expect(since).toBeLessThanOrEqual(after - DUPLICATE_ALERT_WINDOW_MS);
+    expect(mockSendNotification).toHaveBeenCalledTimes(1);
+    expect(mockSendTransaction).not.toHaveBeenCalled();
+  });
+
+  it("warns at the boundary just below the warning threshold and not at it", async () => {
+    mockJobFindMany.mockResolvedValue([
+      { id: "job-1", title: "Test Job 1", contractJobId: "1", clientId: "client-1" },
+    ]);
+    mockNotificationFindMany.mockResolvedValue([]);
+
+    mockGetEscrowTtl.mockResolvedValue({
+      daysRemaining: WARNING_THRESHOLD_DAYS,
+      currentLedger: 100,
+      expiryLedger: 1,
+    });
+    await checkEscrowTtls();
+    expect(mockSendNotification).not.toHaveBeenCalled();
+
+    mockGetEscrowTtl.mockResolvedValue({
+      daysRemaining: AUTO_EXTEND_THRESHOLD_DAYS,
+      currentLedger: 100,
+      expiryLedger: 1,
+    });
+    await checkEscrowTtls();
+    expect(mockSendNotification).toHaveBeenCalledTimes(1);
+    expect(mockSendTransaction).not.toHaveBeenCalled();
   });
 });

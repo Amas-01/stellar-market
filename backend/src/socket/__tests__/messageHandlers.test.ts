@@ -23,6 +23,22 @@ jest.mock("../../lib/redis", () => {
   const { FakeRedisBus, mockRedisModule } = require("../../lib/__tests__/testUtils/fakeRedis");
   return mockRedisModule(new FakeRedisBus());
 });
+jest.mock("../../lib/token-version", () => ({
+  getCurrentTokenVersion: jest.fn().mockResolvedValue(0),
+}));
+
+jest.mock("../../lib/user-cache", () => ({
+  getCachedUserAuthData: jest.fn().mockImplementation((userId: string) =>
+    Promise.resolve({
+      id: userId,
+      role: "CLIENT",
+      emailVerified: true,
+      deletedAt: null,
+      isSuspended: false,
+      suspendReason: null,
+    }),
+  ),
+}));
 
 // ─── Prisma mock ─────────────────────────────────────────────────────────────
 jest.mock("@prisma/client", () => {

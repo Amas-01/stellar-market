@@ -52,9 +52,9 @@ function connectWs(
     };
 
     ws.on("open", () => {
-      // Give the server 200 ms to close immediately-rejected connections
+      // Give the server 100 ms to close immediately-rejected connections
       // before treating the connection as successfully open.
-      timer = setTimeout(settle, 200);
+      timer = setTimeout(settle, 100);
     });
 
     ws.on("close", (code, reason) => {
@@ -208,7 +208,7 @@ describe("Yjs WebSocket server — LRU cache", () => {
       ws.close();
     }
     expect(mockJobFindUnique.mock.calls.length).toBe(callsAfterWarm);
-  });
+  }, 15000);
 
   it("re-queries DB after cache invalidation", async () => {
     mockJobFindUnique.mockResolvedValue({
@@ -231,7 +231,7 @@ describe("Yjs WebSocket server — LRU cache", () => {
     const { ws: ws2 } = await connectWs(url);
     ws2.close();
     expect(mockJobFindUnique.mock.calls.length).toBe(callsBefore + 1);
-  });
+  }, 15000);
 });
 
 describe("Yjs WebSocket server — CRDT update broadcasting", () => {

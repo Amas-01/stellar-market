@@ -46,15 +46,10 @@ While each contract has individual unit tests, these integration tests simulate 
   - Client cancels job
   - Remaining funds refunded to client
 
-### 4. Error Handling
-
-- **`test_reputation_review_before_job_completion_fails`**
-  - Verifies that reviews cannot be submitted before job completion
-  - Tests cross-contract validation
-
-- **`test_duplicate_vote_on_dispute_fails`**
-  - Ensures voters cannot vote twice on the same dispute
-  - Tests dispute contract state management
+Review-before-completion rejection is covered by `test_job_not_completed` in
+[`reputation/src/test.rs`](../reputation/src/test.rs), and duplicate-vote rejection
+by `test_arbitrator_cannot_vote_twice` in
+[`dispute/src/test.rs`](../dispute/src/test.rs).
 
 ## Running the Tests
 

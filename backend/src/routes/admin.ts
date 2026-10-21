@@ -9,9 +9,14 @@ import {
   getJobsAdminQuerySchema,
   overrideDisputeSchema,
   queryPendingDisputesSchema,
+  queryAdminDisputesSchema,
   queryFlaggedUsersSchema,
   getAuditLogsQuerySchema,
+  getReportsAdminQuerySchema,
+  updateReportSchema,
+  patchSuspendUserSchema,
   GetJobsAdminQuery,
+  UpdateReportInput,
 } from "../schemas/admin";
 import { z, ZodError } from "zod";
 import { logAdminAction } from "../utils/auditLogger";
@@ -22,6 +27,7 @@ import { getHorizonStatus, replayHorizonDlq, overrideHorizonCursor } from "../se
 import { projectJobState } from "../services/escrow-projection.service";
 import { ReputationCacheService } from "../services/reputation-cache.service";
 import { logger } from "../lib/logger";
+import { invalidateUserCache } from "../lib/user-cache";
 
 const router = Router();
 const prisma = new PrismaClient();
@@ -32,6 +38,7 @@ const prisma = new PrismaClient();
  */
 router.get(
   "/horizon/status",
+  requireAdmin,
   async (_req: AuthRequest, res: Response): Promise<void> => {
     try {
       const status = await getHorizonStatus();
@@ -49,9 +56,10 @@ router.get(
  */
 router.post(
   "/horizon/cursor",
+  requireAdmin,
   validate({
     body: z.object({
-      cursor: z.string().min(1, "Cursor is required"),
+      cursor: z.string().min(1, "Cursor is required").max(256),
     }),
   }),
   async (req: AuthRequest, res: Response): Promise<void> => {
@@ -81,6 +89,7 @@ router.post(
  */
 router.post(
   "/horizon/dlq/replay",
+  requireAdmin,
   async (req: AuthRequest, res: Response): Promise<void> => {
     try {
       const result = await replayHorizonDlq();
@@ -329,10 +338,7 @@ router.patch(
   "/users/:id/suspend",
   validate({
     params: z.object({ id: z.string().min(1, "User ID is required") }),
-    body: z.object({
-      suspendReason: z.string().optional(),
-      isSuspended: z.boolean(),
-    }),
+    body: patchSuspendUserSchema,
   }),
   async (req: AuthRequest, res: Response): Promise<void> => {
     try {
@@ -356,6 +362,8 @@ router.patch(
           suspendedAt: isSuspended ? new Date() : null,
         },
       });
+
+      await invalidateUserCache(id);
 
       await logAdminAction(
         req.userId!,
@@ -404,9 +412,7 @@ router.delete(
       if (job.clientId) {
         await NotificationService.sendNotification({
           userId: job.clientId,
-          // Note: "CANCELLED" is not a member of the NotificationType enum;
-          // preserved as-is (pre-existing behavior, not a lint-pass concern).
-          type: "CANCELLED" as unknown as NotificationType,
+          type: NotificationType.JOB_REMOVED,
           title: "Job Removed by Moderator",
           message: `Your job listing "${job.title}" has been removed by a platform administrator for violating terms.`,
         });
@@ -431,12 +437,8 @@ router.get(
   validate({ query: getJobsAdminQuerySchema }),
   async (req: AuthRequest, res: Response): Promise<void> => {
     try {
-      const page = parseInt(req.query.page as string) || 1;
-      const limit = parseInt(req.query.limit as string) || 20;
-      // getJobsAdminQuerySchema transforms includeDeleted to a boolean
-      const includeDeleted =
-        (req.query as unknown as GetJobsAdminQuery).includeDeleted === true ||
-        req.query.includeDeleted === "true";
+      const query = req.query as unknown as GetJobsAdminQuery;
+      const { page, limit, includeDeleted } = query;
       const skip = (page - 1) * limit;
 
       const where: Prisma.JobWhereInput = {};
@@ -529,28 +531,50 @@ router.post(
 
 /**
  * GET /api/admin/disputes
- * List all disputes with escalation status
+ * List all disputes with escalation status, paginated (page/limit)
  */
 router.get(
   "/disputes",
   async (req: AuthRequest, res: Response): Promise<void> => {
     try {
-      const disputes = await prisma.dispute.findMany({
-        include: {
-          job: {
-            select: {
-              id: true,
-              title: true,
-              clientId: true,
-              freelancerId: true,
+      const { page, limit } = queryAdminDisputesSchema.parse(req.query);
+      const skip = (page - 1) * limit;
+
+      const [disputes, total] = await Promise.all([
+        prisma.dispute.findMany({
+          skip,
+          take: limit,
+          include: {
+            job: {
+              select: {
+                id: true,
+                title: true,
+                clientId: true,
+                freelancerId: true,
+              },
             },
           },
-        },
-        orderBy: { createdAt: "desc" },
-      });
+          orderBy: { createdAt: "desc" },
+        }),
+        prisma.dispute.count(),
+      ]);
 
-      res.json({ disputes });
+      res.json({
+        disputes,
+        pagination: {
+          total,
+          page,
+          limit,
+          totalPages: Math.ceil(total / limit),
+        },
+      });
     } catch (error) {
+      if (error instanceof ZodError) {
+        res
+          .status(400)
+          .json({ error: "Validation error", details: error.issues });
+        return;
+      }
       logger.error({ err: error }, "Error fetching disputes:");
       res.status(500).json({ error: "Internal server error" });
     }
@@ -907,290 +931,6 @@ router.get(
 );
 
 /**
- * GET /api/admin/disputes
- * List all disputes with escalation status
- */
-router.get(
-  "/disputes",
-  async (req: AuthRequest, res: Response): Promise<void> => {
-    try {
-      const disputes = await prisma.dispute.findMany({
-        include: {
-          job: {
-            select: {
-              id: true,
-              title: true,
-              clientId: true,
-              freelancerId: true,
-            },
-          },
-        },
-        orderBy: { createdAt: "desc" },
-      });
-
-      res.json({ disputes });
-    } catch (error) {
-      logger.error({ err: error }, "Error fetching disputes:");
-      res.status(500).json({ error: "Internal server error" });
-    }
-  },
-);
-
-/**
- * GET /api/admin/disputes/pending
- * List pending disputes for review
- */
-router.get(
-  "/disputes/pending",
-  async (req: AuthRequest, res: Response): Promise<void> => {
-    try {
-      const disputes = await prisma.dispute.findMany({
-        where: { status: DisputeStatus.OPEN },
-        include: {
-          job: {
-            select: {
-              id: true,
-              title: true,
-              clientId: true,
-              freelancerId: true,
-            },
-          },
-        },
-        orderBy: { createdAt: "desc" },
-      });
-
-      res.json({ disputes });
-    } catch (error) {
-      logger.error({ err: error }, "Error fetching pending disputes:");
-      res.status(500).json({ error: "Internal server error" });
-    }
-  },
-);
-
-/**
- * PATCH /api/admin/disputes/:id/override
- * Override dispute outcome
- */
-router.patch(
-  "/disputes/:id/override",
-  async (req: AuthRequest, res: Response): Promise<void> => {
-    try {
-      const id = req.params.id as string;
-      const { outcome, status } = overrideDisputeSchema.parse(req.body);
-
-      const dispute = await prisma.dispute.findUnique({
-        where: { id },
-        include: {
-          client: { select: { walletAddress: true } },
-          freelancer: { select: { walletAddress: true } },
-        },
-      });
-      if (!dispute) {
-        res.status(404).json({ error: "Dispute not found" });
-        return;
-      }
-
-      const updatedDispute = await prisma.dispute.update({
-        where: { id },
-        data: {
-          outcome,
-          status: status as DisputeStatus,
-          resolvedAt: new Date(),
-        },
-      });
-
-      await logAdminAction(req.userId!, "OVERRIDE_DISPUTE", id, {
-        outcome,
-        status,
-      });
-
-      if (dispute.client?.walletAddress) {
-        await ReputationCacheService.invalidateCache(
-          dispute.client.walletAddress,
-        );
-      }
-      if (dispute.freelancer?.walletAddress) {
-        await ReputationCacheService.invalidateCache(
-          dispute.freelancer.walletAddress,
-        );
-      }
-
-      res.json({
-        message: "Dispute outcome overridden successfully",
-        dispute: updatedDispute,
-      });
-    } catch (error) {
-      if (error instanceof ZodError) {
-        res
-          .status(400)
-          .json({ error: "Validation error", details: error.issues });
-        return;
-      }
-      res.status(500).json({ error: "Internal server error" });
-    }
-  },
-);
-
-/**
- * GET /api/admin/audit-log
- * Paginated log of all admin actions
- */
-router.get(
-  "/audit-log",
-  async (req: AuthRequest, res: Response): Promise<void> => {
-    try {
-      const page = parseInt(req.query.page as string) || 1;
-      const limit = parseInt(req.query.limit as string) || 20;
-      const skip = (page - 1) * limit;
-
-      const [logs, total] = await Promise.all([
-        prisma.auditLog.findMany({
-          skip,
-          take: limit,
-          orderBy: { sequence: "desc" },
-        }),
-        prisma.auditLog.count(),
-      ]);
-
-      // actorId is now a free-form string (admin id, end-user id, or the
-      // sentinel "system"), so there is no FK to join on. Resolve display info
-      // for the actorIds that map to a real user and expose it under `admin`
-      // for backward compatibility with existing consumers (issue #875).
-      const actorIds = [
-        ...new Set(
-          logs.map((l) => l.actorId).filter((v): v is string => Boolean(v)),
-        ),
-      ];
-      const actors = actorIds.length
-        ? await prisma.user.findMany({
-            where: { id: { in: actorIds } },
-            select: { id: true, username: true },
-          })
-        : [];
-      const actorMap = new Map(actors.map((a) => [a.id, a]));
-      const logsWithActor = logs.map((l) => ({
-        ...l,
-        admin: l.actorId ? actorMap.get(l.actorId) ?? null : null,
-      }));
-
-      res.json({
-        logs: logsWithActor,
-        pagination: {
-          total,
-          page,
-          limit,
-          totalPages: Math.ceil(total / limit),
-        },
-      });
-    } catch {
-      res.status(500).json({ error: "Internal server error" });
-    }
-  },
-);
-
-/**
- * GET /api/admin/flagged
- * List all flagged jobs and suspended users (Upstream merge)
- */
-router.get(
-  "/flagged",
-  async (req: AuthRequest, res: Response): Promise<void> => {
-    try {
-      const [flaggedJobs, suspendedUsers] = await Promise.all([
-        prisma.job.findMany({
-          where: { isFlagged: true },
-          include: {
-            client: {
-              select: { id: true, username: true, walletAddress: true },
-            },
-          },
-          orderBy: { flaggedAt: "desc" },
-        }),
-        prisma.user.findMany({
-          where: { isSuspended: true },
-          select: {
-            id: true,
-            username: true,
-            walletAddress: true,
-            suspendReason: true,
-            suspendedAt: true,
-          },
-          orderBy: { suspendedAt: "desc" },
-        }),
-      ]);
-
-      res.json({
-        flaggedJobs: flaggedJobs.map((job) => ({
-          id: job.id,
-          title: job.title,
-          client: job.client,
-          flagReason: job.flagReason,
-          flaggedAt: job.flaggedAt,
-        })),
-        suspendedUsers: suspendedUsers,
-      });
-    } catch (error) {
-      logger.error({ err: error }, "Error fetching flagged content:");
-      res.status(500).json({ error: "Internal server error" });
-    }
-  },
-);
-
-/**
- * GET /api/admin/users/flagged
- * List all flagged/suspended users
- */
-router.get(
-  "/users/flagged",
-  async (req: AuthRequest, res: Response): Promise<void> => {
-    try {
-      const users = await prisma.user.findMany({
-        where: { isSuspended: true },
-        select: {
-          id: true,
-          username: true,
-          walletAddress: true,
-          suspendReason: true,
-          suspendedAt: true,
-        },
-        orderBy: { suspendedAt: "desc" },
-      });
-
-      res.json({ users });
-    } catch (error) {
-      logger.error({ err: error }, "Error fetching flagged users:");
-      res.status(500).json({ error: "Internal server error" });
-    }
-  },
-);
-
-/**
- * GET /api/admin/stats
- * Get moderation statistics (Upstream merge)
- */
-router.get("/stats", async (req: AuthRequest, res: Response): Promise<void> => {
-  try {
-    const [totalJobs, flaggedJobs, totalUsers, suspendedUsers] =
-      await Promise.all([
-        prisma.job.count(),
-        prisma.job.count({ where: { isFlagged: true } }),
-        prisma.user.count(),
-        prisma.user.count({ where: { isSuspended: true } }),
-      ]);
-
-    res.json({
-      totalJobs,
-      flaggedJobs,
-      totalUsers,
-      suspendedUsers,
-    });
-  } catch (error) {
-    logger.error({ err: error }, "Error fetching stats:");
-    res.status(500).json({ error: "Internal server error" });
-  }
-});
-
-/**
  * POST /api/admin/jobs/:id/flag
  * Flag a job with reason
  */
@@ -1356,25 +1096,23 @@ router.post(
   },
 );
 
-const REPORT_STATUSES = ["PENDING", "REVIEWED", "DISMISSED"] as const;
-
-
 /**
  * GET /api/admin/reports
  * List all reports, filterable by status and targetType.
  */
 router.get(
   "/reports",
+  validate({ query: getReportsAdminQuerySchema }),
   async (req: AuthRequest, res: Response): Promise<void> => {
     try {
-      const page = Math.max(1, parseInt(req.query.page as string) || 1);
-      const limit = Math.min(100, parseInt(req.query.limit as string) || 20);
+      const query = getReportsAdminQuerySchema.parse(req.query);
+      const { page, limit, status, targetType } = query;
       const skip = (page - 1) * limit;
 
       const where: Prisma.ReportWhereInput = {};
-      if (req.query.status) where.status = req.query.status as Prisma.ReportWhereInput["status"];
-      if (req.query.targetType)
-        where.targetType = req.query.targetType as Prisma.ReportWhereInput["targetType"];
+      if (status) where.status = status as Prisma.ReportWhereInput["status"];
+      if (targetType)
+        where.targetType = targetType as Prisma.ReportWhereInput["targetType"];
 
       const [reports, total] = await Promise.all([
         prisma.report.findMany({
@@ -1413,20 +1151,12 @@ router.patch(
   "/reports/:id",
   validate({
     params: z.object({ id: z.string().min(1, "Report ID is required") }),
-    body: z.object({
-      status: z.enum(REPORT_STATUSES),
-      suspend: z.boolean().optional(),
-      suspendReason: z.string().optional(),
-    }),
+    body: updateReportSchema,
   }),
   async (req: AuthRequest, res: Response): Promise<void> => {
     try {
       const id = req.params.id as string;
-      const { status, suspend, suspendReason } = req.body as {
-        status: (typeof REPORT_STATUSES)[number];
-        suspend?: boolean;
-        suspendReason?: string;
-      };
+      const { status, suspend, suspendReason } = req.body as UpdateReportInput;
 
       const report = await prisma.report.findUnique({ where: { id } });
       if (!report) {

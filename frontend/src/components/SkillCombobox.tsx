@@ -104,6 +104,13 @@ export default function SkillCombobox({
       addSkill(selected ?? query);
       return;
     }
+    if (e.key === ",") {
+      // Lets someone type a natural comma-separated list ("React, Next.js")
+      // and have each one commit as they go, instead of only Enter working.
+      e.preventDefault();
+      addSkill(query);
+      return;
+    }
     if (e.key === "Escape") {
       setOpen(false);
     }
@@ -119,7 +126,14 @@ export default function SkillCombobox({
           setOpen(true);
         }}
         onFocus={() => setOpen(true)}
-        onBlur={() => setTimeout(() => setOpen(false), 150)}
+        onBlur={() => {
+          // Typing "React, Next.js" and clicking away (or tabbing off) without
+          // pressing Enter used to just discard the text — the field looked
+          // filled in but skills stayed empty, only surfacing as a confusing
+          // "Validation failed" on submit. Commit whatever's left instead.
+          if (query.trim()) addSkill(query);
+          setTimeout(() => setOpen(false), 150);
+        }}
         onKeyDown={handleKeyDown}
         className="input-field w-full"
         placeholder={placeholder}

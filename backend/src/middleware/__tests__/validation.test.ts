@@ -1,6 +1,7 @@
 import { Request, Response, NextFunction } from "express";
 import { z } from "zod";
 import { validate } from "../validation";
+import { createJobSchema } from "../../schemas/job";
 
 function makeReqRes(body: unknown, query?: unknown, params?: unknown) {
   const req = {
@@ -67,15 +68,57 @@ describe("validate middleware", () => {
   });
 
   it("returns 422 with BudgetBelowMinimum for budget validation", () => {
-    const budgetSchema = z.object({
-      budget: z.number().min(1, "Budget must be at least 1 XLM"),
-    });
+    const budgetSchema = createJobSchema.pick({ budget: true });
     const { req, res, next, status, json } = makeReqRes({ budget: 0 });
     validate({ body: budgetSchema })(req, res, next);
 
     expect(status).toHaveBeenCalledWith(422);
     const body = json.mock.calls[0][0];
     expect(body.code).toBe("BudgetBelowMinimum");
+    expect(next).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    "The minimum job budget has not been met",
+    "Le budget est inférieur au minimum autorisé",
+  ])("returns 422 for a tagged budget error with message: %s", (message) => {
+    const budgetSchema = z.object({
+      budget: z.number().refine((budget) => budget >= 1, {
+        message,
+        params: { code: "BudgetBelowMinimum" },
+      }),
+    });
+    const { req, res, next, status, json } = makeReqRes({ budget: 0 });
+    validate({ body: budgetSchema })(req, res, next);
+
+    expect(status).toHaveBeenCalledWith(422);
+    expect(json).toHaveBeenCalledWith({ code: "BudgetBelowMinimum", message });
+    expect(next).not.toHaveBeenCalled();
+  });
+
+  it("returns 400 for an untagged error even when its message matches the old prefix", () => {
+    const budgetSchema = z.object({
+      budget: z.number().min(1, "Budget must be at least 1 XLM"),
+    });
+    const { req, res, next, status, json } = makeReqRes({ budget: 0 });
+    validate({ body: budgetSchema })(req, res, next);
+
+    expect(status).toHaveBeenCalledWith(400);
+    expect(json).toHaveBeenCalledWith(expect.objectContaining({
+      code: "VALIDATION_ERROR",
+    }));
+    expect(next).not.toHaveBeenCalled();
+  });
+
+  it("returns 400 for an invalid budget type", () => {
+    const { req, res, next, status, json } = makeReqRes({ budget: "0" });
+    validate({ body: createJobSchema.pick({ budget: true }) })(req, res, next);
+
+    expect(status).toHaveBeenCalledWith(400);
+    expect(json).toHaveBeenCalledWith(expect.objectContaining({
+      code: "VALIDATION_ERROR",
+    }));
+    expect(next).not.toHaveBeenCalled();
   });
 
   it("validates query params and returns {errors} on failure", () => {

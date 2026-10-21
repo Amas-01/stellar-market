@@ -91,7 +91,9 @@ describe("ClientEarningsPage", () => {
     await waitFor(() => expect(screen.getByTestId("bar-f-1")).toBeInTheDocument());
     fireEvent.click(screen.getByTestId("bar-f-1"));
 
-    expect(mockPush).toHaveBeenCalledWith("/u/alpha");
+    // No `username` in this entry's mock data, so the component falls back
+    // to freelancerId rather than the (non-unique, display-only) displayName.
+    expect(mockPush).toHaveBeenCalledWith("/u/f-1");
   });
 
   it("shows an error message when the request fails with 403", async () => {

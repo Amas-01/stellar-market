@@ -34,6 +34,26 @@ function validateEncryptionKey(key: string): void {
 const encryptionKey = process.env.ENCRYPTION_KEY || "";
 validateEncryptionKey(encryptionKey);
 
+// Validate NATIVE_TOKEN_ID at startup — a missing or malformed value causes
+// every escrow creation call to throw deep inside Address parsing, with no
+// indication that a config var is the root cause.
+function validateNativeTokenId(value: string | undefined): string {
+  if (!value) {
+    throw new Error(
+      "NATIVE_TOKEN_ID is required. Please set it to the 56-character Stellar contract address for the native token."
+    );
+  }
+  // Stellar C-strkey contract addresses are exactly 56 characters and start with 'C'
+  if (!/^C[A-Z2-7]{55}$/.test(value)) {
+    throw new Error(
+      `NATIVE_TOKEN_ID must be a valid 56-character Stellar contract address starting with 'C' (got "${value}").`
+    );
+  }
+  return value;
+}
+
+const nativeTokenId = validateNativeTokenId(process.env.NATIVE_TOKEN_ID);
+
 export const config = {
   version,
   port: process.env.PORT || 5000,
@@ -62,7 +82,7 @@ export const config = {
     escrowContractId: process.env.ESCROW_CONTRACT_ID || "",
     disputeContractId: process.env.DISPUTE_CONTRACT_ID || "",
     reputationContractId: process.env.REPUTATION_CONTRACT_ID || "",
-    nativeTokenId: process.env.NATIVE_TOKEN_ID || "CDLZFC3SYJYDZT7K67VZ75YJBMKBAV27Z6Y6Z6Z6Z6Z6Z6Z6Z6Z6Z6Z6Z", // Native XLM on Testnet
+    nativeTokenId,
     keeperSecretKey: process.env.KEEPER_SECRET_KEY || "",
   },
   smtp: {
@@ -71,6 +91,14 @@ export const config = {
     user: process.env.SMTP_USER || "",
     pass: process.env.SMTP_PASS || "",
     from: process.env.SMTP_FROM || "noreply@stellarmarket.io",
+  },
+  email: {
+    // "brevo" sends via Brevo's HTTP API (just an API key, no SMTP login);
+    // anything else falls back to the smtp block above via nodemailer.
+    provider: process.env.EMAIL_SERVICE_PROVIDER || "smtp",
+    apiKey: process.env.EMAIL_SERVICE_API_KEY || "",
+    fromAddress: process.env.EMAIL_FROM_ADDRESS || process.env.SMTP_FROM || "noreply@stellarmarket.io",
+    fromName: process.env.EMAIL_FROM_NAME || "StellarMarket",
   },
   vapidPublicKey: process.env.VAPID_PUBLIC_KEY || "",
   vapidPrivateKey: process.env.VAPID_PRIVATE_KEY || "",

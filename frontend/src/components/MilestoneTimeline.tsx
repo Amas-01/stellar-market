@@ -32,8 +32,8 @@ const emptySubmissionDraft: MilestoneSubmissionDraft = {
   attachmentNames: [],
 };
 
-export function getMilestoneDraftKey(jobId: string, milestoneIndex: number) {
-  return `milestone_draft_${jobId}_${milestoneIndex}`;
+export function getMilestoneDraftKey(jobId: string, milestoneId: string) {
+  return `milestone_draft_${jobId}_${milestoneId}`;
 }
 
 type MilestoneTimelineProps = {
@@ -140,7 +140,7 @@ function MilestoneSubmissionForm({
     emptySubmissionDraft,
   );
   const [draftRestored, setDraftRestored] = useState(false);
-  const draftKey = getMilestoneDraftKey(milestone.jobId, milestoneIndex);
+  const draftKey = getMilestoneDraftKey(milestone.jobId, milestone.id);
 
   useEffect(() => {
     try {
@@ -351,10 +351,10 @@ export default function MilestoneTimeline({
 
   useEffect(() => {
     try {
-      milestones.forEach((milestone, index) => {
+      milestones.forEach((milestone) => {
         if (milestone.status !== "IN_PROGRESS") {
           window.localStorage.removeItem(
-            getMilestoneDraftKey(milestone.jobId, index),
+            getMilestoneDraftKey(milestone.jobId, milestone.id),
           );
         }
       });

@@ -12,9 +12,7 @@ describe("useUnsavedChangesWarning", () => {
   beforeEach(() => {
     mockPush = jest.fn();
     (useRouter as jest.Mock).mockReturnValue({ push: mockPush });
-    // Reset window.location mock for safe parsing
-    delete (window as any).location;
-    window.location = new URL("http://localhost") as any;
+    window.history.pushState({}, "", "http://localhost/");
   });
 
   afterEach(() => {

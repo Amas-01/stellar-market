@@ -24,6 +24,14 @@ export interface NotificationJobData {
 
 const connection = RedisClient.getInstance();
 
+// BullMQ's Worker issues blocking Redis commands and requires a connection with
+// maxRetriesPerRequest: null (the shared app-wide client uses a finite retry count
+// for its own non-blocking commands, so the Worker gets its own duplicated connection).
+const workerConnection = connection.duplicate({
+  maxRetriesPerRequest: null,
+  lazyConnect: false,
+});
+
 export const notificationQueue = new Queue<NotificationJobData, void, string>("notifications", {
   connection,
   defaultJobOptions: {
@@ -46,6 +54,8 @@ export function getNotificationPriority(type: NotificationType): NotificationPri
     case "NEW_MESSAGE":
     case "APPLICATION_ACCEPTED":
     case "APPLICATION_REJECTED":
+    case "JOB_REMOVED":
+    case "JOB_EXPIRED":
       return NotificationPriority.HIGH;
 
     case "JOB_APPLIED":
@@ -130,7 +140,7 @@ export function startNotificationWorker(
       }
     },
     {
-      connection,
+      connection: workerConnection,
       concurrency: 20,
     },
   );
@@ -157,4 +167,5 @@ export async function stopNotificationWorker() {
     await worker.close();
     worker = null;
   }
+  workerConnection.disconnect();
 }

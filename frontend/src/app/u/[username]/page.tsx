@@ -8,6 +8,7 @@ import ReputationPanel from "./ReputationPanel.server";
 import ReviewsSection from "./ReviewsSection.server";
 import PortfolioSection from "./PortfolioSection.server";
 import EarningsSummary from "./EarningsSummary.server";
+import { generateProfileMetadata } from "@/components/SEOMetadata";
 import HeaderSkeleton from "./skeletons/HeaderSkeleton";
 import JobsSkeleton from "./skeletons/JobsSkeleton";
 import ReputationSkeleton from "./skeletons/ReputationSkeleton";
@@ -44,30 +45,13 @@ export async function generateMetadata({
     };
   }
 
-  const title = `${profile.username} — Freelancer | StellarMarket`;
-  const description =
-    profile.bio?.substring(0, 160) ||
-    `Hire ${profile.username} on StellarMarket — decentralized freelance marketplace.`;
-  const image = profile.avatarUrl ?? `${baseUrl}/og-image.png`;
-
-  return {
-    title,
-    description,
-    alternates: { canonical },
-    openGraph: {
-      title,
-      description,
-      url: canonical,
-      type: "profile",
-      images: [{ url: image, width: 1200, height: 630, alt: profile.username }],
-    },
-    twitter: {
-      card: "summary_large_image",
-      title,
-      description,
-      images: [image],
-    },
-  };
+  return generateProfileMetadata({
+    name: profile.username,
+    tagline: "Freelancer",
+    bio: profile.bio || `Hire ${profile.username} on StellarMarket — decentralized freelance marketplace.`,
+    avatar: profile.avatarUrl,
+    url: canonical,
+  });
 }
 
 export default async function PublicProfilePage({

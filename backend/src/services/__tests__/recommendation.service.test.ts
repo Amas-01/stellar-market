@@ -94,6 +94,11 @@ describe("recencyScore", () => {
     const veryOld = new Date("2025-01-01T00:00:00Z");
     expect(recencyScore(veryOld, now)).toBe(0);
   });
+
+  it("returns exactly 1 for a future createdAt (clock skew case)", () => {
+    const futureDate = new Date("2026-03-01T00:00:00Z");
+    expect(recencyScore(futureDate, now)).toBe(1);
+  });
 });
 
 // ─── Reputation Score ────────────────────────────────────────────────────────

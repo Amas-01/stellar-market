@@ -57,6 +57,15 @@ export class DeadlineExtensionService {
       );
     }
 
+    // Milestones that are already approved/paid out are no longer actionable,
+    // so an extension for them would only create a meaningless on-chain attempt
+    if (milestone.status === "APPROVED" || milestone.status === "PARTIALLY_PAID") {
+      throw createError(
+        `Cannot request a deadline extension for a milestone with status: ${milestone.status}`,
+        400,
+      );
+    }
+
     // Validate new deadline is in the future
     if (newDeadline <= new Date()) {
       throw createError("New deadline must be in the future", 400);
@@ -360,17 +369,30 @@ export class DeadlineExtensionService {
   static async confirmExtensionTransaction(
     extensionRequestId: string,
     txHash: string,
+    userId: string,
   ) {
     const extensionRequest = await prisma.deadlineExtensionRequest.findUnique({
       where: { id: extensionRequestId },
       include: {
         milestone: true,
-        job: true,
+        job: { include: { client: true, freelancer: true } },
       },
     });
 
     if (!extensionRequest) {
       throw createError("Extension request not found", 404);
+    }
+
+    // Validate the caller is a job participant (IDOR guard)
+    const job = extensionRequest.job;
+    const isClient = job.clientId === userId;
+    const isFreelancer = job.freelancerId === userId;
+
+    if (!isClient && !isFreelancer) {
+      throw createError(
+        "Only job participants can confirm extension transactions",
+        403,
+      );
     }
 
     // Update milestone deadline
@@ -396,7 +418,6 @@ export class DeadlineExtensionService {
     });
 
     // Notify both parties
-    const job = extensionRequest.job;
     const message = `Deadline for milestone "${extensionRequest.milestone.title}" has been extended to ${extensionRequest.newDeadline.toLocaleDateString()}.`;
 
     await NotificationService.sendNotification({

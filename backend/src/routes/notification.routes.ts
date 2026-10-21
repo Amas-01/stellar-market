@@ -96,8 +96,6 @@ router.delete(
   }),
 );
 
-export default router;
-
 // Subscribe to push notifications
 router.post(
   "/push/subscribe",
@@ -135,3 +133,5 @@ router.delete(
     res.status(200).json({ message: "Successfully unsubscribed from push notifications." });
   }),
 );
+
+export default router;

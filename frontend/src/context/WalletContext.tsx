@@ -18,6 +18,7 @@ import {
 import { rpc, Transaction, Horizon } from "@stellar/stellar-sdk";
 import { Loader2, QrCode, Wallet, Smartphone } from "lucide-react";
 import { useToast } from "@/components/Toast";
+import { refreshAccessToken } from "@/lib/authToken";
 
 export class FreighterTimeoutError extends Error {
   constructor() {
@@ -165,6 +166,13 @@ export function WalletProvider({ children }: { children: React.ReactNode }) {
   const [balances, setBalances] = useState<WalletBalance[]>([]);
   const [isLoadingBalance, setIsLoadingBalance] = useState(false);
   const [walletType, setWalletType] = useState<WalletProviderType | null>(null);
+  // Which provider the current "not installed" error is actually about — set
+  // explicitly at the point of failure. walletType only gets set on a
+  // *successful* connect, so relying on it (or on isFreighterInstalled alone)
+  // to pick the error message meant the modal could show "LOBSTR not
+  // installed" for a failed Freighter attempt whenever walletType happened to
+  // be stale from an earlier attempt.
+  const [notInstalledProvider, setNotInstalledProvider] = useState<"freighter" | "lobstr" | null>(null);
   const [showWalletSelect, setShowWalletSelect] = useState(false);
   const [showDisconnectConfirm, setShowDisconnectConfirm] = useState(false);
   const pendingConnectResolve = useRef<((address: string | null) => void) | null>(null);
@@ -548,17 +556,18 @@ export function WalletProvider({ children }: { children: React.ReactNode }) {
 
   const connectFreighter = useCallback(async () => {
     setError(null);
+    setNotInstalledProvider(null);
     setIsConnecting(true);
     try {
-      if (
-        typeof window !== "undefined" &&
-        !(window as unknown as Record<string, unknown>).freighter
-      ) {
-        setError("NOT_INSTALLED");
-        return null;
-      }
+      // Freighter no longer injects a raw `window.freighter` global — the
+      // official @stellar/freighter-api's isConnected() below is the correct,
+      // current way to detect it. A stale window.freighter check used to run
+      // here first and would report "not installed" even with a genuinely
+      // installed, working extension, since that global is never set by
+      // current Freighter versions.
       const installed = await checkFreighterInstalled();
       if (!installed) {
+        setNotInstalledProvider("freighter");
         setError("NOT_INSTALLED");
         return null;
       }
@@ -637,6 +646,7 @@ export function WalletProvider({ children }: { children: React.ReactNode }) {
 
   const connectLOBSTR = useCallback(async () => {
     setError(null);
+    setNotInstalledProvider(null);
     setIsConnecting(true);
     try {
       const kit = await getWalletKit();
@@ -667,6 +677,7 @@ export function WalletProvider({ children }: { children: React.ReactNode }) {
       const msg = err instanceof Error ? err.message : "";
       if (msg.includes("not installed") || msg.includes("not found") || msg.includes("LOBSTR")) {
         setIsLobstrInstalled(false);
+        setNotInstalledProvider("lobstr");
         setError("NOT_INSTALLED");
       } else if (msg.includes("network") || msg.includes("Network")) {
         setError("NETWORK_MISMATCH");
@@ -807,11 +818,30 @@ export function WalletProvider({ children }: { children: React.ReactNode }) {
       return { success: false, error: "No wallet connected. Connect a wallet first." };
     }
     const API = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:5000/api/v1";
+
+    // The access token backing `authToken` is short-lived (15m). If it's
+    // already expired by the time the user gets through connecting a wallet
+    // and signing a message, retry once with a freshly refreshed token
+    // instead of failing outright with "Invalid or expired token."
+    let currentToken = authToken;
+    const fetchWithRefresh = async (input: string, init: RequestInit): Promise<Response> => {
+      const withAuth = (token: string): RequestInit => ({
+        ...init,
+        headers: { ...init.headers, Authorization: `Bearer ${token}` },
+      });
+      const response = await fetch(input, withAuth(currentToken));
+      if (response.status !== 401) return response;
+
+      const refreshed = await refreshAccessToken();
+      if (!refreshed) return response;
+      currentToken = refreshed;
+      return fetch(input, withAuth(currentToken));
+    };
+
     try {
       // Step 1 — fetch a one-time challenge from the server
-      const challengeRes = await fetch(`${API}/auth/wallet/challenge`, {
+      const challengeRes = await fetchWithRefresh(`${API}/auth/wallet/challenge`, {
         method: "POST",
-        headers: { Authorization: `Bearer ${authToken}` },
       });
       if (!challengeRes.ok) {
         const body = await challengeRes.json().catch(() => ({}));
@@ -826,12 +856,9 @@ export function WalletProvider({ children }: { children: React.ReactNode }) {
       const signature = await signMessage(challenge);
 
       // Step 3 — submit address + signature for server-side verification
-      const verifyRes = await fetch(`${API}/auth/wallet/verify`, {
+      const verifyRes = await fetchWithRefresh(`${API}/auth/wallet/verify`, {
         method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: `Bearer ${authToken}`,
-        },
+        headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ address, signature }),
       });
       if (!verifyRes.ok) {
@@ -1164,21 +1191,24 @@ export function WalletProvider({ children }: { children: React.ReactNode }) {
             <div className="mb-4">
               <h2 className="text-lg font-semibold text-theme-heading">Extension not found</h2>
               <p className="text-sm text-theme-text mt-1">
-                {isFreighterInstalled === false && walletType !== "lobstr"
-                  ? "Freighter extension is not installed. Please install it to continue."
-                  : "LOBSTR extension is not installed. Please install it to continue."}
+                {notInstalledProvider === "lobstr"
+                  ? "LOBSTR extension is not installed. Please install it to continue."
+                  : "Freighter extension is not installed. Please install it to continue."}
               </p>
             </div>
             <div className="flex gap-3">
               <button
                 type="button"
-                onClick={() => setError(null)}
+                onClick={() => {
+                  setError(null);
+                  setNotInstalledProvider(null);
+                }}
                 className="flex-1 rounded-lg border border-theme-border px-4 py-2 text-sm text-theme-text hover:text-theme-heading"
               >
                 Cancel
               </button>
               <a
-                href={walletType === "lobstr" ? "https://lobstr.co" : "https://freighter.app"}
+                href={notInstalledProvider === "lobstr" ? "https://lobstr.co" : "https://freighter.app"}
                 target="_blank"
                 rel="noopener noreferrer"
                 className="flex-1 rounded-lg bg-stellar-blue px-4 py-2 text-sm text-white hover:bg-stellar-blue/90 text-center"

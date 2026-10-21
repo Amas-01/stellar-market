@@ -25,6 +25,7 @@ jest.mock("@prisma/client", () => {
   const actual = jest.requireActual("@prisma/client") as typeof import("@prisma/client");
   const mockPrisma = {
     user: { findUnique: jest.fn() },
+    transaction: { aggregate: jest.fn() },
     $queryRaw: jest.fn(),
   };
   return {
@@ -44,6 +45,7 @@ import type { ApiError } from "../../middleware/error";
 
 const prismaMock = new PrismaClient() as unknown as {
   user: { findUnique: jest.Mock };
+  transaction: { aggregate: jest.Mock };
   $queryRaw: jest.Mock;
 };
 const fetchOnChainMock = fetchOnChainPayments as jest.Mock;
@@ -86,6 +88,55 @@ function reconciliationResult(overrides: Partial<Record<string, unknown>> = {}) 
 beforeEach(() => {
   jest.clearAllMocks();
   prismaMock.user.findUnique.mockResolvedValue(freelancer);
+});
+
+describe("GET /api/freelancers/earnings/summary", () => {
+  it("returns 400 when freelancerId is missing", async () => {
+    const res = await request(app).get("/api/freelancers/earnings/summary");
+    expect(res.status).toBe(400);
+  });
+
+  it("returns the summed total for the freelancer's wallet", async () => {
+    prismaMock.user.findUnique.mockResolvedValue(freelancer);
+    prismaMock.transaction.aggregate.mockResolvedValue({ _sum: { amount: 250 } });
+
+    const res = await request(app).get(
+      "/api/freelancers/earnings/summary?freelancerId=freelancer-1",
+    );
+
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ total: 250 });
+    expect(prismaMock.transaction.aggregate).toHaveBeenCalledWith({
+      where: {
+        toAddress: "GFREELANCER",
+        type: { in: ["RELEASE", "DISPUTE_PAYOUT"] },
+      },
+      _sum: { amount: true },
+    });
+  });
+
+  it("returns a zero total when the freelancer has no wallet address on file", async () => {
+    prismaMock.user.findUnique.mockResolvedValue({ ...freelancer, walletAddress: null });
+
+    const res = await request(app).get(
+      "/api/freelancers/earnings/summary?freelancerId=freelancer-1",
+    );
+
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ total: 0 });
+    expect(prismaMock.transaction.aggregate).not.toHaveBeenCalled();
+  });
+
+  it("returns a zero total when the freelancer does not exist", async () => {
+    prismaMock.user.findUnique.mockResolvedValue(null);
+
+    const res = await request(app).get(
+      "/api/freelancers/earnings/summary?freelancerId=does-not-exist",
+    );
+
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ total: 0 });
+  });
 });
 
 describe("GET /api/freelancers/earnings/reconcile", () => {

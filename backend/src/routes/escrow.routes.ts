@@ -680,19 +680,12 @@ router.post("/confirm-tx", authenticate, idempotency(), asyncHandler(async (req:
       });
       if (!updatedMilestone.jobId) return;
       affectedJobId = updatedMilestone.jobId;
-      const allMilestones = await tx.milestone.findMany({ where: { jobId: updatedMilestone.jobId } });
-      if (allMilestones.every(m => m.status === "APPROVED")) {
-        await tx.job.update({
-          where: { id: updatedMilestone.jobId },
-          data: { status: "COMPLETED", escrowStatus: EscrowStatus.COMPLETED },
-        });
-      }
       if (updatedMilestone.job.freelancerId) {
         await NotificationService.sendNotification({
           userId: updatedMilestone.job.freelancerId,
           type: NotificationType.MILESTONE_APPROVED,
           title: "Milestone Approved",
-          message: `Your milestone "${updatedMilestone.title}" has been approved and funds released!`,
+          message: `Your milestone "${updatedMilestone.title}" has been approved.`,
           metadata: { jobId: updatedMilestone.jobId, milestoneId: updatedMilestone.id },
         });
       }

@@ -33,6 +33,12 @@ export default function NotificationBell() {
     // Tracks which socket instance has listeners attached so reconnects
     // don't result in duplicated event handlers.
     const listenerSocketRef = useRef<typeof socket>(null);
+    // Mirrors `open` so the socket listener (attached once per socket) can tell
+    // whether the dropdown is visible without re-subscribing on every toggle.
+    const openRef = useRef(false);
+    useEffect(() => {
+        openRef.current = open;
+    }, [open]);
 
     const fetchUnreadCount = useCallback(async () => {
         if (!token) return;
@@ -196,8 +202,17 @@ export default function NotificationBell() {
         if (listenerSocketRef.current === socket) return;
         listenerSocketRef.current = socket;
 
-        const handleNewNotification = () => {
+        const handleNewNotification = (notification: Notification) => {
             setUnreadCount((prev: number) => prev + 1);
+            // While the dropdown is open the list is not refetched, so show the new
+            // item immediately. When closed, opening the dropdown refetches anyway.
+            if (openRef.current && notification?.id) {
+                setNotifications((prev) =>
+                    prev.some((n) => n.id === notification.id)
+                        ? prev
+                        : [notification, ...prev].slice(0, DROPDOWN_LIMIT),
+                );
+            }
         };
 
         const handleNotificationsRead = () => {

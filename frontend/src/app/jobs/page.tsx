@@ -16,7 +16,7 @@ import {
   type ListImperativeAPI,
   type RowComponentProps,
 } from "react-window";
-import { Search, SlidersHorizontal, Briefcase, Loader2, Wifi, ArrowUp, X } from "lucide-react";
+import { Search, SlidersHorizontal, Loader2, Wifi, ArrowUp, X } from "lucide-react";
 import { useRouter, useSearchParams, usePathname } from "next/navigation";
 import axios from "axios";
 import JobCard from "@/components/JobCard";
@@ -217,20 +217,32 @@ function JobsContent() {
     [filters, debouncedSearch, postedAfterDate],
   );
 
+  // Only the first load restores the depth encoded in ?page=N; filter changes start from page 1.
+  const restoreDepth = useRef(page);
+
   const fetchFirstPage = useCallback(async () => {
     setLoading(true);
-    setPage(1);
+    const depth = Math.max(1, restoreDepth.current || 1);
+    restoreDepth.current = 1;
     try {
-      const res = await axios.get<PaginatedResponse<Job>>(`${API_URL}/jobs`, {
+      const first = await axios.get<PaginatedResponse<Job>>(`${API_URL}/jobs`, {
         params: buildParams(1),
       });
-      const jobs = res.data.data;
+      const lastPage = Math.min(depth, Math.max(1, first.data.totalPages));
+      const rest = await Promise.all(
+        Array.from({ length: lastPage - 1 }, (_, i) =>
+          axios.get<PaginatedResponse<Job>>(`${API_URL}/jobs`, { params: buildParams(i + 2) }),
+        ),
+      );
+      const last = rest.length ? rest[rest.length - 1] : first;
+      const jobs = [first, ...rest].flatMap((r) => r.data.data);
+      setPage(lastPage);
       setFeedState({
         ids: jobs.map((j) => j.id),
         entities: new Map(jobs.map((j) => [j.id, j])),
       });
-      setTotal(res.data.total);
-      setHasMore(jobs.length === JOBS_PER_PAGE && res.data.totalPages > 1);
+      setTotal(first.data.total);
+      setHasMore(last.data.data.length === JOBS_PER_PAGE && lastPage < first.data.totalPages);
     } catch {
       setFeedState({ ids: [], entities: new Map() });
       setTotal(0);

@@ -1,4 +1,5 @@
 import { createJobSchema } from "../job";
+import { config } from "../../config";
 
 describe("createJobSchema", () => {
   const validJob = {
@@ -35,10 +36,38 @@ describe("createJobSchema", () => {
     expect(result.error.issues).toEqual(
       expect.arrayContaining([
         expect.objectContaining({
+          code: "custom",
           path: ["budget"],
+          params: { code: "BudgetBelowMinimum" },
           message: "Budget must be at least 1 XLM",
         }),
       ]),
     );
+  });
+
+  it("accepts a budget exactly at the platform minimum", () => {
+    const result = createJobSchema.safeParse({
+      ...validJob,
+      budget: config.platformMinBudgetXlm,
+    });
+
+    expect(result.success).toBe(true);
+  });
+
+  it("rejects a positive budget below the platform minimum", () => {
+    const result = createJobSchema.safeParse({
+      ...validJob,
+      budget: config.platformMinBudgetXlm / 2,
+    });
+
+    expect(result.success).toBe(false);
+    if (result.success) throw new Error("Expected a below-minimum budget to be rejected.");
+    expect(result.error.issues).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        code: "custom",
+        path: ["budget"],
+        params: { code: "BudgetBelowMinimum" },
+      }),
+    ]));
   });
 });

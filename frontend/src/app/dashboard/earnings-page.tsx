@@ -135,7 +135,7 @@ function resolveRange(preset: RangePreset): { from: string | null; to: string | 
 }
 
 const authHeader = () => ({
-  Authorization: `Bearer ${typeof window !== "undefined" ? localStorage.getItem("token") : ""}`,
+  Authorization: `Bearer ${typeof window !== "undefined" ? localStorage.getItem("stellarmarket_jwt") : ""}`,
 });
 
 const EarningsPage = () => {

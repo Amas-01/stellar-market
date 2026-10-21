@@ -5,8 +5,8 @@ type Props = { userPromise: Promise<any> };
 
 export default async function PortfolioSection({ userPromise }: Props) {
   const user = await userPromise;
-  const res = await fetch(`${API_URL}/portfolio/${encodeURIComponent(user.id)}`, { next: { revalidate: 60 } });
-  const items = res.ok ? await res.json() : [];
+  const res = await fetch(`${API_URL}/portfolio/user/${encodeURIComponent(user.id)}`, { next: { revalidate: 60 } });
+  const { items = [] } = res.ok ? await res.json() : {};
 
   if (items.length === 0) return null;
 

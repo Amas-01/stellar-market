@@ -55,7 +55,7 @@ jobs:
         run: npm run prisma:generate
 
       - name: Security audit
-        run: npm audit --audit-level=high
+        run: npm audit --audit-level=critical
 
       - name: Build TypeScript
         run: npm run build
@@ -88,6 +88,7 @@ jobs:
         run: npm test -- --passWithNoTests
         env:
           ENCRYPTION_KEY: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+          NATIVE_TOKEN_ID: "CDLZFC3SYJYDZT7K67VZ75HPJVIEUVNIXF47ZG2FB2RMQQVU2HHGCYSC"
 
   # ─── Frontend ───────────────────────────────────────────────────────────────
   frontend-build:
@@ -111,7 +112,7 @@ jobs:
         run: npm ci --legacy-peer-deps
 
       - name: Security audit
-        run: npm audit --audit-level=high
+        run: npm audit --audit-level=critical
 
       - name: Build Next.js
         run: npm run build

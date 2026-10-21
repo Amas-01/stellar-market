@@ -10,7 +10,7 @@ jest.mock("@prisma/client", () => {
 });
 
 import { PrismaClient } from "@prisma/client";
-import { normalizeSkills } from "../skill.service";
+import { normalizeSkills, searchSkills } from "../skill.service";
 
 const prismaMock = new PrismaClient() as unknown as MockPrismaClient;
 
@@ -47,5 +47,32 @@ describe("normalizeSkills", () => {
     const result = await normalizeSkills([]);
     expect(result).toEqual([]);
     expect(prismaMock.skill.findMany).not.toHaveBeenCalled();
+  });
+});
+
+describe("searchSkills — limit handling", () => {
+  it("empty query honours a small limit", async () => {
+    await searchSkills("", 5);
+    expect(prismaMock.skill.findMany).toHaveBeenCalledWith(expect.objectContaining({ take: 5 }));
+  });
+
+  it("empty query with no limit keeps the default of 100", async () => {
+    await searchSkills("");
+    expect(prismaMock.skill.findMany).toHaveBeenCalledWith(expect.objectContaining({ take: 100 }));
+  });
+
+  it("empty query caps the limit at 100", async () => {
+    await searchSkills("   ", 500);
+    expect(prismaMock.skill.findMany).toHaveBeenCalledWith(expect.objectContaining({ take: 100 }));
+  });
+
+  it("non-empty query uses the caller's limit", async () => {
+    await searchSkills("rea", 3);
+    expect(prismaMock.skill.findMany).toHaveBeenCalledWith(expect.objectContaining({ take: 3 }));
+  });
+
+  it("non-empty query with no limit defaults to 10", async () => {
+    await searchSkills("rea");
+    expect(prismaMock.skill.findMany).toHaveBeenCalledWith(expect.objectContaining({ take: 10 }));
   });
 });

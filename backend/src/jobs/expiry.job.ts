@@ -46,21 +46,23 @@ async function expireJobs(): Promise<void> {
     });
 
     for (const job of openExpired) {
-      await prisma.job.update({
-        where: { id: job.id },
-        data: { status: "EXPIRED" },
-      });
+      try {
+        await prisma.job.update({
+          where: { id: job.id },
+          data: { status: "EXPIRED" },
+        });
 
-      await NotificationService.sendNotification({
-        userId: job.clientId,
-        // Note: "CANCELLED" is not a member of the NotificationType enum;
-        // preserved as-is (pre-existing behavior, not a lint-pass concern).
-        type: "CANCELLED" as unknown as NotificationType,
-        title: "Job Expired",
-        message: `Your job "${job.title}" has expired without being funded and has been closed.`,
-      });
+        await NotificationService.sendNotification({
+          userId: job.clientId,
+          type: NotificationType.JOB_EXPIRED,
+          title: "Job Expired",
+          message: `Your job "${job.title}" has expired without being funded and has been closed.`,
+        });
 
-      logger.info({ jobId: job.id }, "[ExpiryJob] Marked OPEN job as EXPIRED");
+        logger.info({ jobId: job.id }, "[ExpiryJob] Marked OPEN job as EXPIRED");
+      } catch (err) {
+        logger.error({ err, jobId: job.id }, "[ExpiryJob] Failed to expire open job");
+      }
     }
 
     const fundedExpired = await prisma.job.findMany({
@@ -88,11 +90,9 @@ async function expireJobs(): Promise<void> {
 
         await NotificationService.sendNotification({
           userId: job.clientId,
-          // Note: "CANCELLED" is not a member of the NotificationType enum;
-        // preserved as-is (pre-existing behavior, not a lint-pass concern).
-        type: "CANCELLED" as unknown as NotificationType,
+          type: NotificationType.JOB_EXPIRED,
           title: "Funded Job Expired",
-          message: `Your funded job "${job.title}" passed its deadline and has been marked as expired. Escrow refund will be processed.`,
+          message: `Your funded job "${job.title}" passed its deadline and has been marked as expired. Please contact support to claim your escrow refund.`,
         });
 
         logger.info({ jobId: job.id }, "[ExpiryJob] Marked FUNDED job as EXPIRED");
@@ -148,3 +148,5 @@ export function startExpiryJob(): void {
   setInterval(executeWithLock, ONE_HOUR_MS);
   logger.info("[ExpiryJob] Scheduled — runs every hour with distributed lock");
 }
+
+export { expireJobs };

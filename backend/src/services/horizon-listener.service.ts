@@ -304,17 +304,24 @@ async function handleBadgeAwarded(event: SorobanEvent): Promise<void> {
     return;
   }
 
-  const result = await prisma.badge.upsert({
-    where: { userId_tier: { userId: user.id, tier } },
-    update: {},
-    create: {
-      userId: user.id,
-      tier,
-      awardedLedger: event.ledger,
-    },
-  });
+  // Insert-only: the unique (userId, tier) constraint decides whether this delivery is the
+  // one that awarded the badge. A redelivered or replayed event violates the constraint
+  // (P2002) and must not notify again, so it is treated as a no-op.
+  let awarded = false;
+  try {
+    await prisma.badge.create({
+      data: {
+        userId: user.id,
+        tier,
+        awardedLedger: event.ledger,
+      },
+    });
+    awarded = true;
+  } catch (err) {
+    if ((err as { code?: string }).code !== "P2002") throw err;
+  }
 
-  if (result.awardedLedger === event.ledger) {
+  if (awarded) {
     await NotificationService.sendNotification({
       userId: user.id,
       type: "BADGE_AWARDED",
@@ -577,17 +584,88 @@ export async function getHorizonStatus(): Promise<{ cursor: string; dlqDepth: nu
 }
 
 export async function overrideHorizonCursor(cursor: string): Promise<void> {
-  const ledger = parseInt(cursor, 10);
-  if (!isNaN(ledger)) {
-    await prisma.syncState.upsert({
-      where: { id: SYNC_STATE_ID },
-      update: { lastIndexedLedger: ledger },
-      create: { id: SYNC_STATE_ID, lastIndexedLedger: ledger },
-    });
+  // Reject anything that is not a clean non-negative integer. parseInt alone would
+  // accept partial input such as "12abc" and turn "abc" into NaN, so a typo would
+  // otherwise be silently ignored.
+  const ledger = Number(cursor);
+  if (!/^\d+$/.test(cursor) || !Number.isSafeInteger(ledger)) {
+    throw new Error(`Invalid Horizon cursor "${cursor}": expected a non-negative integer ledger number`);
   }
+  await prisma.syncState.upsert({
+    where: { id: SYNC_STATE_ID },
+    update: { lastIndexedLedger: ledger },
+    create: { id: SYNC_STATE_ID, lastIndexedLedger: ledger },
+  });
 }
 
 export async function replayHorizonDlq(): Promise<{ replayed: number; failed: number }> {
-  // Simplistic implementation for tests
-  return { replayed: 0, failed: 0 };
+  // Fetch all DLQ entries that have not yet been successfully replayed.
+  const pending = await prisma.horizonDlq.findMany({
+    where: { replayedAt: null },
+    orderBy: { id: "asc" },
+  });
+
+  let replayed = 0;
+  let failed = 0;
+
+  for (const entry of pending) {
+    let event: SorobanEvent;
+    try {
+      // Payload is stored as a base64-encoded JSON string of the original event.
+      const raw =
+        typeof entry.payload === "string"
+          ? entry.payload
+          : Buffer.from(JSON.stringify(entry.payload)).toString();
+      const jsonStr = Buffer.from(raw, "base64").toString("utf8");
+      event = JSON.parse(jsonStr) as SorobanEvent;
+    } catch (parseErr) {
+      logger.error(
+        { id: entry.id, err: parseErr },
+        "[HorizonListener] DLQ replay — failed to deserialise payload, skipping",
+      );
+      await prisma.horizonDlq.update({
+        where: { id: entry.id },
+        data: {
+          attempt: { increment: 1 },
+          error: `Payload deserialisation error: ${parseErr instanceof Error ? parseErr.message : String(parseErr)}`,
+        },
+      });
+      failed++;
+      continue;
+    }
+
+    try {
+      await processEvent(event);
+      await prisma.horizonDlq.update({
+        where: { id: entry.id },
+        data: { replayedAt: new Date() },
+      });
+      replayed++;
+      logger.info(
+        { id: entry.id, cursor: entry.cursor },
+        "[HorizonListener] DLQ entry replayed successfully",
+      );
+    } catch (replayErr) {
+      const errorMessage =
+        replayErr instanceof Error ? replayErr.message : String(replayErr);
+      await prisma.horizonDlq.update({
+        where: { id: entry.id },
+        data: {
+          attempt: { increment: 1 },
+          error: errorMessage,
+        },
+      });
+      failed++;
+      logger.error(
+        { id: entry.id, cursor: entry.cursor, err: replayErr },
+        "[HorizonListener] DLQ entry replay failed",
+      );
+    }
+  }
+
+  logger.info(
+    { replayed, failed, total: pending.length },
+    "[HorizonListener] DLQ replay complete",
+  );
+  return { replayed, failed };
 }

@@ -22,7 +22,7 @@ export default function ServiceCard({ service }: ServiceCardProps) {
           </span>
           <div className="flex items-center gap-1 text-yellow-500">
             <Star size={14} fill="currentColor" />
-            <span className="text-xs font-semibold">{averageRating}</span>
+            <span className="text-xs font-semibold">{averageRating.toFixed(1)}</span>
             <span className="text-xs text-theme-text">({reviewCount})</span>
           </div>
         </div>

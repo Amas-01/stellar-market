@@ -16,6 +16,7 @@ mod reputation {
         pub total_score: u64,
         pub total_weight: u64,
         pub review_count: u32,
+        pub last_updated_ts: u32,
     }
 }
 
@@ -46,10 +47,12 @@ pub enum DisputeError {
     AppealNotFound = 21,
     NonceReplay = 22,
     DuplicateArbitrator = 23,
-    // Note: Error code 24 (InvalidVoteChoice) was removed as unreachable.
-    // VoteChoice is a #[contracttype] enum; the SDK's deserialization layer
-    // traps on invalid discriminants before the function body executes, so
-    // no code path could ever construct or return this error variant.
+    InvalidArbitrator = 24,
+    ExclusionNotConfirmed = 25,
+    ReplacementUnavailable = 26,
+    InsufficientActiveArbitrators = 27,
+    EvidenceCapReached = 28,
+    DuplicateEvidence = 29,
 }
 
 #[contracttype]
@@ -124,6 +127,7 @@ pub struct Appeal {
 pub enum VoteChoice {
     Client,
     Freelancer,
+    /// Vote to refund a percentage split; the value is a whole-number percentage (0–100).
     RefundSplit(u32),
     /// Vote that the dispute initiator filed in bad faith.
     MaliciousFiling,
@@ -139,6 +143,14 @@ pub struct Vote {
     pub reason: String,
     pub timestamp: u64,
 }
+
+/// Maximum refund-split percentage, expressed as a whole-number percentage (0–100).
+/// Used to validate the `VoteChoice::RefundSplit` variant.
+pub const MAX_REFUND_SPLIT_PCT: u32 = 100;
+
+/// Total basis points representing a full (100%) split, used to validate the
+/// `VoteChoice::SplitAward` variant where `client_bps + freelancer_bps` must equal this.
+pub const SPLIT_AWARD_TOTAL_BPS: u32 = 10_000;
 
 /// A single piece of evidence attached to a dispute.
 #[contracttype]
@@ -184,7 +196,7 @@ pub struct DisputeTally {
     pub refund_split_sum: u64,
     /// Number of votes for refund split.
     pub refund_split_count: u32,
-    /// Number of votes for malicious filing.
+    /// Total weight of votes for malicious filing.
     pub malicious_weight: u64,
     /// Number of votes for malicious filing.
     pub malicious_count: u32,
@@ -272,6 +284,7 @@ enum DataKey {
     Evidence(u64),
     /// Caches the intended `DisputeResolution` when the escrow callback fails; cleared on retry success.
     PendingResolution(u64),
+    ExclusionProposal(u64, Address),
 }
 
 fn require_not_paused(env: &Env) -> Result<(), DisputeError> {
@@ -316,10 +329,40 @@ const APPEAL_WINDOW_SECS: u64 = 172_800; // 48 hours
 /// Minimum votes required to resolve an appeal.
 const APPEAL_MIN_VOTES: u32 = 3;
 
+/// Minimum total votes before a MaliciousFiling determination can trigger
+/// (issue #1169). Below this, the ratio check alone could fire on a single
+/// stray vote (e.g. 1/1 = 100%).
+const MALICIOUS_FILING_MIN_VOTES: u32 = 5;
+/// Numerator of the malicious-filing supermajority ratio: requires
+/// `votes_for_malicious * MALICIOUS_FILING_SUPERMAJORITY_NUM >=
+/// total_votes * MALICIOUS_FILING_SUPERMAJORITY_DENOM`, i.e. ≥ 4/5 (80%).
+const MALICIOUS_FILING_SUPERMAJORITY_NUM: u32 = 4;
+/// Denominator of the malicious-filing supermajority ratio (see above).
+const MALICIOUS_FILING_SUPERMAJORITY_DENOM: u32 = 5;
+
 const NONCE_EXPIRY_LEDGERS: u32 = 3;
 
-const MIN_TTL_THRESHOLD: u32 = 1_000;
-const MIN_TTL_EXTEND_TO: u32 = 10_000;
+/// Production TTL sizing for dispute-related storage, based on Stellar's
+/// ~5-second ledger close time and mirroring the escrow contract's
+/// `LEDGERS_PER_DAY` pattern.
+///
+/// A dispute can remain live for roughly **16 days** in the worst case: a
+/// 7-day voting period, a 48-hour appeal window after resolution, and a
+/// further 7-day appeal voting period. The per-dispute persistent storage TTL
+/// must comfortably exceed that window so a long-idle dispute — no interaction
+/// for hours, which is normal early in the voting window — is never archived by
+/// the ledger before it is resolved or appealed. (The previous 1,000/10,000
+/// ledger constants covered only ~14 hours, far short of the lifecycle.)
+const LEDGERS_PER_DAY: u32 = 17_280; // 86,400 seconds/day ÷ 5 seconds/ledger
+const MIN_TTL_THRESHOLD: u32 = LEDGERS_PER_DAY * 21; // 21 days = 362,880 ledgers
+const MIN_TTL_EXTEND_TO: u32 = LEDGERS_PER_DAY * 30; // 30 days = 518,400 ledgers
+
+/// Instance storage holds global monotonic counters (DisputeCount, AppealCount,
+/// arbitrator pool, pause flag). Give it a very long TTL so those counters
+/// survive extended contract idleness, matching the escrow contract's instance
+/// storage sizing.
+const INSTANCE_TTL_THRESHOLD: u32 = 50_000_000;
+const INSTANCE_TTL_EXTEND_TO: u32 = 50_000_000;
 
 fn consume_nonce(env: &Env, caller: &Address, function: &Symbol, nonce: u64) -> Result<(), DisputeError> {
     let key = DataKey::Nonce(caller.clone(), function.clone(), nonce);
@@ -363,10 +406,10 @@ fn bump_has_voted_ttl(env: &Env, dispute_id: u64, voter: &Address) {
     );
 }
 
-fn bump_dispute_count_ttl(env: &Env) {
+fn bump_instance_ttl(env: &Env) {
     env.storage()
         .instance()
-        .extend_ttl(MIN_TTL_THRESHOLD, MIN_TTL_EXTEND_TO);
+        .extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_EXTEND_TO);
 }
 
 fn bump_job_dispute_ttl(env: &Env, job_id: u64) {
@@ -437,6 +480,24 @@ fn bump_pending_resolution_ttl(env: &Env, dispute_id: u64) {
     env.storage().persistent().extend_ttl(
         &DataKey::PendingResolution(dispute_id),
         MIN_TTL_THRESHOLD,
+        MIN_TTL_EXTEND_TO,
+    );
+}
+
+/// Every other `bump_*_ttl` helper extends only when the entry's remaining
+/// TTL has fallen below `MIN_TTL_THRESHOLD`, because that key gets touched
+/// repeatedly over a dispute's lifetime and each touch is another chance to
+/// refresh it. `ExclusionProposal` has no such second chance: it exists for
+/// exactly one write (this call) and is either confirmed and removed, or
+/// never touched again. A fresh persistent entry's ledger-assigned baseline
+/// TTL already exceeds `MIN_TTL_THRESHOLD`, so extending with that same
+/// threshold here would be a guaranteed no-op on the very write meant to
+/// protect it — passing `MIN_TTL_EXTEND_TO` as the threshold instead forces
+/// the extension to actually take effect immediately (#1166).
+fn bump_exclusion_proposal_ttl(env: &Env, dispute_id: u64, voter: &Address) {
+    env.storage().persistent().extend_ttl(
+        &DataKey::ExclusionProposal(dispute_id, voter.clone()),
+        MIN_TTL_EXTEND_TO,
         MIN_TTL_EXTEND_TO,
     );
 }
@@ -680,6 +741,25 @@ fn select_arbitrators(
     selected
 }
 
+fn select_replacement_arbitrator(env: &Env, dispute: &Dispute) -> Option<Address> {
+    let pool: Vec<Address> = env
+        .storage()
+        .instance()
+        .get(&DataKey::ArbitratorPool)
+        .unwrap_or(Vec::new(env));
+
+    for candidate in pool.iter() {
+        if candidate != dispute.client
+            && candidate != dispute.freelancer
+            && !dispute.assigned_arbitrators.contains(&candidate)
+            && !dispute.excluded_voters.contains(&candidate)
+        {
+            return Some(candidate);
+        }
+    }
+    None
+}
+
 #[contract]
 pub struct DisputeContract;
 
@@ -718,7 +798,7 @@ impl DisputeContract {
             .instance()
             .set(&DataKey::ReputationSlashBps, &DEFAULT_REPUTATION_SLASH_BPS);
 
-        bump_dispute_count_ttl(&env);
+        bump_instance_ttl(&env);
 
         // Emit event
         env.events().publish(
@@ -735,7 +815,7 @@ impl DisputeContract {
         require_admin(&env, &admin)?;
 
         env.storage().instance().set(&DataKey::Paused, &true);
-        bump_dispute_count_ttl(&env);
+        bump_instance_ttl(&env);
 
         // Emit event
         env.events().publish(
@@ -752,7 +832,7 @@ impl DisputeContract {
         require_admin(&env, &admin)?;
 
         env.storage().instance().set(&DataKey::Paused, &false);
-        bump_dispute_count_ttl(&env);
+        bump_instance_ttl(&env);
 
         // Emit event
         env.events().publish(
@@ -776,7 +856,7 @@ impl DisputeContract {
         env.storage()
             .instance()
             .set(&DataKey::MinVoterReputation, &min_reputation);
-        bump_dispute_count_ttl(&env);
+        bump_instance_ttl(&env);
 
         // Emit event
         env.events().publish(
@@ -794,7 +874,7 @@ impl DisputeContract {
         require_admin(&env, &admin)?;
 
         env.storage().instance().set(&DataKey::CooldownDuration, &seconds);
-        bump_dispute_count_ttl(&env);
+        bump_instance_ttl(&env);
 
         env.events().publish(
             (symbol_short!("dispute"), symbol_short!("cooldown")),
@@ -846,7 +926,7 @@ impl DisputeContract {
         initiator: Address,
         reason: String,
         min_votes: u32,
-        tie_break_method: Option<TieBreakMethod>,
+        _tie_break_method: Option<TieBreakMethod>,
     ) -> Result<u64, DisputeError> {
         initiator.require_auth();
         require_not_paused(&env)?;
@@ -921,7 +1001,7 @@ impl DisputeContract {
             votes_for_malicious: 0,
             votes_for_split_award: 0,
             min_votes: if min_votes < AUTO_RESOLVE_VOTE_THRESHOLD { AUTO_RESOLVE_VOTE_THRESHOLD } else { min_votes },
-            tie_break_method: tie_break_method.unwrap_or(TieBreakMethod::RefundBoth),
+            tie_break_method: TieBreakMethod::RefundBoth,
             created_at: env.ledger().timestamp(),
             voting_deadline: env.ledger().timestamp().saturating_add(VOTING_PERIOD_SECS),
             excluded_voters,
@@ -935,7 +1015,7 @@ impl DisputeContract {
             .set(&DataKey::Dispute(count), &dispute);
         env.storage().instance().set(&DataKey::DisputeCount, &count);
         bump_dispute_ttl(&env, count);
-        bump_dispute_count_ttl(&env);
+        bump_instance_ttl(&env);
         env.storage()
             .persistent()
             .set(&DataKey::Votes(count), &Vec::<Vote>::new(&env));
@@ -1105,7 +1185,7 @@ impl DisputeContract {
             VoteChoice::Client => dispute.votes_for_client += 1,
             VoteChoice::Freelancer => dispute.votes_for_freelancer += 1,
             VoteChoice::RefundSplit(pct_client) => {
-                if pct_client > 100 {
+                if pct_client > MAX_REFUND_SPLIT_PCT {
                     return Err(DisputeError::InvalidSplitBps);
                 }
                 dispute.votes_for_refund_split += 1;
@@ -1114,7 +1194,7 @@ impl DisputeContract {
             }
             VoteChoice::MaliciousFiling => dispute.votes_for_malicious += 1,
             VoteChoice::SplitAward(client_bps, freelancer_bps) => {
-                if client_bps.saturating_add(freelancer_bps) != 10_000 {
+                if client_bps.saturating_add(freelancer_bps) != SPLIT_AWARD_TOTAL_BPS {
                     return Err(DisputeError::InvalidSplitBps);
                 }
                 dispute.votes_for_split_award += 1;
@@ -1211,8 +1291,8 @@ impl DisputeContract {
         Ok(())
     }
 
-    /// Add a voter to the exclusion list for a dispute (only during Open status).
-    /// Can only be called by the client or freelancer involved in the dispute.
+    /// Propose or confirm an assigned arbitrator's exclusion while voting is open.
+    /// Both parties must agree and an eligible replacement must be available.
     pub fn add_excluded_voter(
         env: Env,
         dispute_id: u64,
@@ -1239,16 +1319,49 @@ impl DisputeContract {
             return Err(DisputeError::VotingClosed);
         }
 
-        // Add voter to excluded list if not already present
-        if !dispute.excluded_voters.contains(&voter) {
-            dispute.excluded_voters.push_back(voter.clone());
+        if !dispute.assigned_arbitrators.contains(&voter) {
+            return Err(DisputeError::InvalidArbitrator);
         }
 
-        // Store updated dispute
+        let proposal_key = DataKey::ExclusionProposal(dispute_id, voter.clone());
+        let proposer: Option<Address> = env.storage().persistent().get(&proposal_key);
+        if proposer.is_none() {
+            env.storage().persistent().set(&proposal_key, &caller);
+            // Every other persistent key in this contract gets its TTL
+            // extended on write — an exclusion proposal awaiting the second
+            // party's confirmation is no different, and without this it
+            // could expire from storage before that confirmation ever
+            // happens (#1166).
+            bump_exclusion_proposal_ttl(&env, dispute_id, &voter);
+            return Ok(());
+        }
+        if proposer == Some(caller) {
+            return Err(DisputeError::ExclusionNotConfirmed);
+        }
+
+        let replacement = select_replacement_arbitrator(&env, &dispute)
+            .ok_or(DisputeError::ReplacementUnavailable)?;
+        let mut updated_arbitrators = Vec::<Address>::new(&env);
+        for assigned in dispute.assigned_arbitrators.iter() {
+            if assigned == voter {
+                updated_arbitrators.push_back(replacement.clone());
+            } else {
+                updated_arbitrators.push_back(assigned);
+            }
+        }
+        dispute.excluded_voters.push_back(voter.clone());
+        dispute.assigned_arbitrators = updated_arbitrators.clone();
+        dispute.arbitrator_count = updated_arbitrators.len();
+
         env.storage()
             .persistent()
             .set(&DataKey::Dispute(dispute_id), &dispute);
+        env.storage()
+            .persistent()
+            .set(&DataKey::Arbitrators(dispute_id), &updated_arbitrators);
+        env.storage().persistent().remove(&proposal_key);
         bump_dispute_ttl(&env, dispute_id);
+        bump_arbitrators_ttl(&env, dispute_id);
 
         // Emit event
         env.events().publish(
@@ -1259,12 +1372,32 @@ impl DisputeContract {
                 dispute.job_id,
                 dispute.client,
                 dispute.freelancer,
+                replacement,
             ),
         );
 
         Ok(())
     }
 
+    /// Resolve a dispute by executing the voting outcome.
+    ///
+    /// Computes the final resolution based on arbitrator votes and executes the
+    /// corresponding settlement via the escrow contract, transitioning the dispute
+    /// to its resolved state. Can only be called once voting has closed with a
+    /// decisive majority (or enough votes to break a tie).
+    ///
+    /// # Arguments
+    /// * `dispute_id` — The unique identifier of the dispute to resolve
+    ///
+    /// # Returns
+    /// The new [`DisputeStatus`] of the resolved dispute
+    ///
+    /// # Errors
+    /// * `DisputeNotFound` — if no dispute exists with the given ID
+    /// * `NotInitialized` — if the escrow contract address is not configured
+    /// * `VotingClosed` — if voting has not yet concluded
+    /// * `NotEnoughVotes` — if there are insufficient votes to determine an outcome
+    /// * `ContractPaused` — if the contract is paused
     pub fn resolve_dispute(env: Env, dispute_id: u64) -> Result<DisputeStatus, DisputeError> {
         require_not_paused(&env)?;
 
@@ -1305,6 +1438,16 @@ impl DisputeContract {
 
         if env.ledger().timestamp() < dispute.voting_deadline {
             return Err(DisputeError::VotingPeriodNotExpired);
+        }
+
+        let mut active_arbitrators = 0u32;
+        for arbitrator in dispute.assigned_arbitrators.iter() {
+            if !dispute.excluded_voters.contains(&arbitrator) {
+                active_arbitrators = active_arbitrators.saturating_add(1);
+            }
+        }
+        if active_arbitrators < AUTO_RESOLVE_VOTE_THRESHOLD {
+            return Err(DisputeError::InsufficientActiveArbitrators);
         }
 
         internal_resolve(&env, dispute_id, &mut dispute, &escrow_addr, true)
@@ -1391,7 +1534,7 @@ impl DisputeContract {
         bump_appeal_ttl(&env, appeal_count);
         bump_appeal_votes_ttl(&env, appeal_count);
         bump_dispute_appeal_ttl(&env, dispute_id);
-        bump_dispute_count_ttl(&env);
+        bump_instance_ttl(&env);
 
         env.events().publish(
             (symbol_short!("dispute"), symbol_short!("appealed")),
@@ -1464,7 +1607,7 @@ impl DisputeContract {
             VoteChoice::Client => ap.votes_for_client += 1,
             VoteChoice::Freelancer => ap.votes_for_freelancer += 1,
             VoteChoice::RefundSplit(pct) => {
-                if pct > 100 {
+                if pct > MAX_REFUND_SPLIT_PCT {
                     return Err(DisputeError::InvalidSplitBps);
                 }
                 ap.votes_for_refund_split += 1;
@@ -1751,6 +1894,14 @@ impl DisputeContract {
             .unwrap_or(Vec::new(&env))
     }
 
+    /// Get all votes for an appeal.
+    pub fn get_appeal_votes(env: Env, appeal_id: u64) -> Vec<Vote> {
+        env.storage()
+            .persistent()
+            .get(&DataKey::AppealVotes(appeal_id))
+            .unwrap_or(Vec::new(&env))
+    }
+
     /// Submit evidence for an active dispute.
     ///
     /// Only the client or freelancer involved in the dispute may submit evidence.
@@ -1788,13 +1939,13 @@ impl DisputeContract {
 
         // Check if evidence count has reached the cap
         if evidence.len() >= MAX_EVIDENCE_PER_DISPUTE {
-            return Err(DisputeError::Unauthorized);
+            return Err(DisputeError::EvidenceCapReached);
         }
 
         // Check if the evidence hash already exists
         for existing in evidence.iter() {
             if existing.evidence_hash == evidence_hash {
-                return Err(DisputeError::Unauthorized);
+                return Err(DisputeError::DuplicateEvidence);
             }
         }
 
@@ -2032,7 +2183,7 @@ impl DisputeContract {
 
         pool.push_back(arbitrator.clone());
         env.storage().instance().set(&DataKey::ArbitratorPool, &pool);
-        bump_dispute_count_ttl(&env);
+        bump_instance_ttl(&env);
 
         env.events().publish(
             (symbol_short!("dispute"), symbol_short!("arb_added")),
@@ -2068,7 +2219,7 @@ impl DisputeContract {
 
         if removed {
             env.storage().instance().set(&DataKey::ArbitratorPool, &new_pool);
-            bump_dispute_count_ttl(&env);
+            bump_instance_ttl(&env);
 
             // Revoke the arbitrator's voting rights on all open disputes they were assigned to.
             let dispute_count: u64 = env
@@ -2158,9 +2309,17 @@ impl DisputeContract {
         );
 
         if !escrow_ok {
+            // Indexer payload: (dispute_id: u64, status: DisputeStatus, job_id: u64, client: Address, freelancer: Address, resolution: DisputeResolution)
             env.events().publish(
                 (symbol_short!("dispute"), Symbol::new(&env, "escrow_fail")),
-                (dispute_id, dispute.job_id),
+                (
+                    dispute_id,
+                    dispute.status.clone(),
+                    dispute.job_id,
+                    dispute.client.clone(),
+                    dispute.freelancer.clone(),
+                    resolution,
+                ),
             );
             return Ok(DisputeStatus::ResolutionFailed);
         }
@@ -2269,9 +2428,12 @@ fn internal_resolve(
     }
 
     // ── Supermajority check: MaliciousFiling requires 4 out of every 5 votes ─────
-    // votes_for_malicious * 5 >= total_votes * 4  ↔  ≥ 80 % of all votes
-    let is_malicious_supermajority = total_votes >= 5
-        && dispute.votes_for_malicious.saturating_mul(5) >= total_votes.saturating_mul(4);
+    // votes_for_malicious * NUM >= total_votes * DENOM  ↔  ≥ 80 % of all votes
+    let is_malicious_supermajority = total_votes >= MALICIOUS_FILING_MIN_VOTES
+        && dispute
+            .votes_for_malicious
+            .saturating_mul(MALICIOUS_FILING_SUPERMAJORITY_DENOM)
+            >= total_votes.saturating_mul(MALICIOUS_FILING_SUPERMAJORITY_NUM);
 
     if is_malicious_supermajority {
         dispute.status = DisputeStatus::MaliciousDisputeFiling;
@@ -2300,9 +2462,17 @@ fn internal_resolve(
                 .persistent()
                 .set(&DataKey::Dispute(dispute_id), &*dispute);
             bump_dispute_ttl(env, dispute_id);
+            // Indexer payload: (dispute_id: u64, status: DisputeStatus, job_id: u64, client: Address, freelancer: Address, resolution: DisputeResolution)
             env.events().publish(
                 (symbol_short!("dispute"), Symbol::new(env, "escrow_fail")),
-                (dispute_id, dispute.job_id),
+                (
+                    dispute_id,
+                    dispute.status.clone(),
+                    dispute.job_id,
+                    dispute.client.clone(),
+                    dispute.freelancer.clone(),
+                    DisputeResolution::MaliciousFiling,
+                ),
             );
             return Ok(DisputeStatus::ResolutionFailed);
         }
@@ -2444,9 +2614,17 @@ fn internal_resolve(
                 .persistent()
                 .set(&DataKey::Dispute(dispute_id), &*dispute);
             bump_dispute_ttl(env, dispute_id);
+            // Indexer payload: (dispute_id: u64, status: DisputeStatus, job_id: u64, client: Address, freelancer: Address, resolution: DisputeResolution)
             env.events().publish(
                 (symbol_short!("dispute"), Symbol::new(env, "escrow_fail")),
-                (dispute_id, dispute.job_id),
+                (
+                    dispute_id,
+                    dispute.status.clone(),
+                    dispute.job_id,
+                    dispute.client.clone(),
+                    dispute.freelancer.clone(),
+                    resolution,
+                ),
             );
             return Ok(DisputeStatus::ResolutionFailed);
         }

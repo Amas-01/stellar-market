@@ -5,6 +5,14 @@ import { logger } from "../lib/logger";
 
 const connection = RedisClient.getInstance();
 
+// BullMQ's Worker issues blocking Redis commands and requires a connection with
+// maxRetriesPerRequest: null (the shared app-wide client uses a finite retry count
+// for its own non-blocking commands, so the Worker gets its own duplicated connection).
+const workerConnection = connection.duplicate({
+  maxRetriesPerRequest: null,
+  lazyConnect: false,
+});
+
 export type RecommendationRebuildJob = {
   jobId: string;
 };
@@ -40,7 +48,7 @@ function startRecommendationWorker(): void {
       await RecommendationService.rebuildRecommendationsForJob(job.data.jobId);
     },
     {
-      connection,
+      connection: workerConnection,
       concurrency: 5,
     },
   );
@@ -71,5 +79,6 @@ export class RecommendationQueueService {
       await worker.close();
       worker = null;
     }
+    workerConnection.disconnect();
   }
 }

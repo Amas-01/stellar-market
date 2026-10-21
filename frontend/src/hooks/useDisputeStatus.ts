@@ -61,7 +61,7 @@ export function useDisputeStatus({
     }
 
     try {
-      const token = localStorage.getItem("token");
+      const token = localStorage.getItem("stellarmarket_jwt");
       const res = await axios.get<Dispute>(`${API_URL}/disputes/${disputeId}`, {
         headers: token ? { Authorization: `Bearer ${token}` } : {},
       });

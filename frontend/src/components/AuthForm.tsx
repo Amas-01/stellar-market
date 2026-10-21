@@ -5,24 +5,43 @@ import { useAuth } from "@/context/AuthContext";
 import { useWallet } from "@/context/WalletContext";
 import { Loader2, Mail, Lock, User as UserIcon, Wallet, ShieldCheck, Gift, ChevronDown } from "lucide-react";
 import Link from "next/link";
-import { useSearchParams } from "next/navigation";
+import { useRouter, useSearchParams } from "next/navigation";
 
 interface AuthFormProps {
   type: "login" | "register";
 }
 
 export default function AuthForm({ type }: AuthFormProps) {
-  const { login, register } = useAuth();
+  const { login, user, isLoading: authLoading } = useAuth();
   const { address, connect, isConnecting, error: walletError, signMessage } = useWallet();
+  const router = useRouter();
   const searchParams = useSearchParams();
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [referralOpen, setReferralOpen] = useState(false);
 
+  // Nothing here checked whether the visitor was already logged in — the
+  // navbar (a separate, global component reading the same session) would
+  // show them as signed in while this form still asked them to log in
+  // again, with no relationship between the two. Redirect away once we know
+  // for sure (authLoading false) rather than mid-flow, so this doesn't fire
+  // while a fresh login/register submission is still in progress.
+  useEffect(() => {
+    if (!authLoading && user) {
+      router.replace("/dashboard");
+    }
+  }, [authLoading, user, router]);
+
   // 2FA state
   const [twoFactorPending, setTwoFactorPending] = useState(false);
   const [tempToken, setTempToken] = useState("");
   const [totpCode, setTotpCode] = useState("");
+
+  // Post-registration state — no session is issued until the user clicks
+  // the verification link, so this just shows a "check your email" screen
+  // instead of the form.
+  const [checkEmailFor, setCheckEmailFor] = useState<string | null>(null);
+  const [resendState, setResendState] = useState<"idle" | "sending" | "sent">("idle");
 
   const [formData, setFormData] = useState({
     username: "",
@@ -92,7 +111,7 @@ export default function AuthForm({ type }: AuthFormProps) {
         });
 
         const data = await response.json();
-        if (!response.ok) throw new Error(data.message || "Login failed");
+        if (!response.ok) throw new Error(data.error || data.message || "Login failed");
 
         if (data.requiresTwoFactor) {
           setTwoFactorPending(true);
@@ -126,13 +145,28 @@ export default function AuthForm({ type }: AuthFormProps) {
         });
 
         const data = await response.json();
-        if (!response.ok) throw new Error(data.message || "Registration failed");
-        register(data.token, data.user);
+        if (!response.ok) throw new Error(data.error || data.message || "Registration failed");
+        setCheckEmailFor(formData.email);
       }
     } catch (err: any) { // eslint-disable-line @typescript-eslint/no-explicit-any
       setError(err.message);
     } finally {
       setIsLoading(false);
+    }
+  };
+
+  const handleResendVerification = async () => {
+    if (!checkEmailFor) return;
+    setResendState("sending");
+    const API = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:5000/api/v1";
+    try {
+      await fetch(`${API}/auth/resend-verification`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ email: checkEmailFor }),
+      });
+    } finally {
+      setResendState("sent");
     }
   };
 
@@ -172,6 +206,46 @@ export default function AuthForm({ type }: AuthFormProps) {
       setIsLoading(false);
     }
   };
+
+  if (authLoading || user) {
+    return (
+      <div className="flex items-center justify-center p-8">
+        <Loader2 size={32} className="animate-spin text-stellar-blue" />
+      </div>
+    );
+  }
+
+  if (checkEmailFor) {
+    return (
+      <div className="w-full max-w-md p-8 bg-theme-card border border-theme-border rounded-2xl shadow-xl">
+        <div className="text-center mb-6">
+          <Mail size={48} className="mx-auto mb-4 text-stellar-blue" />
+          <h1 className="text-2xl font-bold text-theme-heading mb-2">Check your email</h1>
+          <p className="text-theme-text">
+            We sent a verification link to{" "}
+            <span className="font-medium text-theme-heading">{checkEmailFor}</span>. Click it to finish
+            creating your account and log in.
+          </p>
+        </div>
+
+        <button
+          onClick={handleResendVerification}
+          disabled={resendState === "sending"}
+          className="w-full btn-secondary py-3 flex items-center justify-center gap-2 font-semibold disabled:opacity-60"
+        >
+          {resendState === "sending" ? <Loader2 size={18} className="animate-spin" /> : null}
+          {resendState === "sent" ? "Verification email sent" : "Resend verification email"}
+        </button>
+
+        <Link
+          href="/auth/login"
+          className="block w-full text-center mt-4 text-sm text-stellar-blue hover:underline"
+        >
+          Back to login
+        </Link>
+      </div>
+    );
+  }
 
   if (twoFactorPending) {
     return (

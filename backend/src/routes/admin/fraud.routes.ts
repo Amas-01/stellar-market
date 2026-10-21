@@ -28,6 +28,11 @@ const listQuerySchema = z.object({
   pageSize: z.coerce.number().int().min(1).max(100).optional(),
 });
 
+const historyQuerySchema = z.object({
+  page: z.coerce.number().int().min(1).optional(),
+  pageSize: z.coerce.number().int().min(1).max(100).optional(),
+});
+
 /**
  * GET /api/admin/fraud/queue
  * The human review queue: subjects whose risk score crossed the review
@@ -133,7 +138,9 @@ router.post(
 
 /**
  * GET /api/admin/fraud/subjects/:type/:id/history
- * Full assessment history for any subject, flagged or not.
+ * Full assessment history for any subject, flagged or not. Paginated with
+ * page/pageSize (default 50 per page); `total` and `hasMore` tell reviewers
+ * when older assessments exist beyond the current page.
  */
 router.get(
   "/subjects/:type/:id/history",
@@ -142,14 +149,16 @@ router.get(
       type: z.nativeEnum(RiskSubjectType),
       id: z.string().min(1),
     }),
+    query: historyQuerySchema,
   }),
   async (req: AuthRequest, res: Response): Promise<void> => {
     try {
-      const history = await getSubjectHistory(
+      const { items, total, page, pageSize, hasMore } = await getSubjectHistory(
         req.params.type as RiskSubjectType,
         req.params.id as string,
+        req.query as z.infer<typeof historyQuerySchema>,
       );
-      res.json({ history });
+      res.json({ history: items, total, page, pageSize, hasMore });
     } catch {
       res.status(500).json({ error: "Internal server error" });
     }

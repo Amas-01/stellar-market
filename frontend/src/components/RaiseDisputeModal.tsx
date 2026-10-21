@@ -140,7 +140,9 @@ export default function RaiseDisputeModal({
     setError(null);
 
     try {
-      const token = localStorage.getItem("token");
+      const token =
+        localStorage.getItem("stellarmarket_jwt") ??
+        localStorage.getItem("token");
 
       const fetchRaiseDisputeXdr = async () => {
         const r = await axios.post(

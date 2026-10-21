@@ -903,17 +903,42 @@ export async function getFlagWithHistory(flagId: string, historyLimit = 50) {
   return { flag, history };
 }
 
-/** Assessment history for any subject, whether or not it was ever flagged. */
+export interface HistoryQuery {
+  page?: number;
+  pageSize?: number;
+}
+
+/** Default page size for subject history; callers page past it with `page`. */
+export const HISTORY_DEFAULT_PAGE_SIZE = 50;
+export const HISTORY_MAX_PAGE_SIZE = 100;
+
+/**
+ * Assessment history for any subject, whether or not it was ever flagged.
+ * Newest first, paginated; `total` lets callers tell when more rows exist.
+ */
 export async function getSubjectHistory(
   subjectType: RiskSubjectType,
   subjectId: string,
-  limit = 50,
+  query: HistoryQuery = {},
 ) {
-  return prisma.riskAssessment.findMany({
-    where: { subjectType, subjectId },
-    orderBy: { createdAt: "desc" },
-    take: limit,
-  });
+  const page = Math.max(1, query.page ?? 1);
+  const pageSize = Math.min(
+    HISTORY_MAX_PAGE_SIZE,
+    Math.max(1, query.pageSize ?? HISTORY_DEFAULT_PAGE_SIZE),
+  );
+  const where = { subjectType, subjectId };
+
+  const [items, total] = await Promise.all([
+    prisma.riskAssessment.findMany({
+      where,
+      orderBy: { createdAt: "desc" },
+      skip: (page - 1) * pageSize,
+      take: pageSize,
+    }),
+    prisma.riskAssessment.count({ where }),
+  ]);
+
+  return { items, total, page, pageSize, hasMore: page * pageSize < total };
 }
 
 const TERMINAL_REVIEW_STATUSES: RiskFlagStatus[] = [

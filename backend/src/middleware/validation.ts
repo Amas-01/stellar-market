@@ -1,5 +1,6 @@
 import { Request, Response, NextFunction } from "express";
 import { ZodSchema, ZodError } from "zod";
+import * as fs from "fs";
 
 export const validate = (schema: {
   body?: ZodSchema;
@@ -28,13 +29,17 @@ export const validate = (schema: {
 
       next();
     } catch (error) {
+      if (req.file && fs.existsSync(req.file.path)) {
+        fs.unlinkSync(req.file.path);
+      }
       if (error instanceof ZodError) {
         // Special-case: budget below platform minimum → 422 with dedicated code
         const budgetMinimumError = error.issues.find(
           (issue) =>
             issue.path.length === 1 &&
             issue.path[0] === "budget" &&
-            issue.message.startsWith("Budget must be at least "),
+            issue.code === "custom" &&
+            issue.params?.code === "BudgetBelowMinimum",
         );
         if (budgetMinimumError) {
           res.status(422).json({

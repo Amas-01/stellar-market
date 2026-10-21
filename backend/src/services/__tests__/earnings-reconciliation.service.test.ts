@@ -127,6 +127,7 @@ jest.mock("@stellar/stellar-sdk", () => ({
 
 import {
   fetchOnChainPayments,
+  reconcileEarnings,
   remediateOnChainOnly,
   flagDbOnlyForReview,
   type OnChainOnlyEarning,
@@ -323,5 +324,49 @@ describe("flagDbOnlyForReview — never auto-deletes", () => {
     // No delete method exists on the mock at all — flagging must never call
     // one, so there is nothing wired up for it to reach.
     expect((mockTransaction as Record<string, unknown>).delete).toBeUndefined();
+  });
+});
+
+// ─── Memo fallback with multiple earnings records per job (#1637) ────────────
+
+describe("reconcileEarnings — memo fallback with several records for one job", () => {
+  it("matches each memo-referenced payment to a distinct record for the same job", async () => {
+    horizonPages = [
+      [
+        makeMemoRecord({
+          transaction_hash: "ONCHAIN_1",
+          created_at: "2026-01-10T00:00:00Z",
+          transaction: async () => ({ memo_type: "text", memo: "job-9" }),
+        }),
+        makeMemoRecord({
+          transaction_hash: "ONCHAIN_2",
+          created_at: "2026-01-11T00:00:00Z",
+          transaction: async () => ({ memo_type: "text", memo: "job-9" }),
+        }),
+      ],
+    ];
+
+    const jobForBoth = {
+      id: "job-9",
+      title: "Multi-milestone job",
+      category: "dev",
+      client: { username: "client" },
+    };
+    mockTransaction.findMany.mockResolvedValue([
+      { txHash: "DB_1", jobId: "job-9", amount: 50, createdAt: new Date("2026-01-05"), job: jobForBoth },
+      { txHash: "DB_2", jobId: "job-9", amount: 50, createdAt: new Date("2026-01-06"), job: jobForBoth },
+    ]);
+
+    const result = await reconcileEarnings(
+      "GFREELANCER",
+      new Date("2026-01-01T00:00:00Z"),
+      new Date("2026-02-01T00:00:00Z"),
+    );
+
+    expect(result.summary.matchedCount).toBe(2);
+    expect(result.summary.onChainOnlyCount).toBe(0);
+    expect(result.summary.dbOnlyCount).toBe(0);
+    expect(result.summary.allMatched).toBe(true);
+    expect(result.matched.map((m) => m.jobId)).toEqual(["job-9", "job-9"]);
   });
 });

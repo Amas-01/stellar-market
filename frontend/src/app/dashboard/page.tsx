@@ -16,10 +16,6 @@ import {
   Clock,
   CheckCircle2,
   Trash2,
-  Send,
-  XCircle,
-  Eye,
-  ChevronRight,
 } from "lucide-react";
 import axios from "axios";
 import StatusBadge from "@/components/StatusBadge";
@@ -235,42 +231,6 @@ export default function DashboardPage() {
       setDataLoading(false);
     }
   }, [token, user, isClient, isClientByProfile]);
-
-  const fetchPendingApplicants = useCallback(async () => {
-    if (!token || !user?.id || !isClient) return;
-    setApplicantsLoading(true);
-    try {
-      const jobsRes = await axios.get(`\${API}/jobs/mine`, {
-        params: { limit: 100 },
-        headers: { Authorization: `Bearer ${token}` },
-      });
-      const clientJobs: Job[] = (jobsRes.data.data ?? []).filter(
-        (j: Job) => j.client?.id === user.id && j.status === "OPEN"
-      );
-
-      const allApps: ExtendedApplication[] = [];
-      for (const job of clientJobs) {
-        try {
-          const appsRes = await axios.get(`\${API}/jobs/${job.id}/applications`, {
-            params: { status: "PENDING", limit: 20 },
-            headers: { Authorization: `Bearer ${token}` },
-          });
-          const apps = (appsRes.data.data ?? []).map((a: ExtendedApplication) => ({
-            ...a,
-            job: { id: job.id, title: job.title },
-          }));
-          allApps.push(...apps);
-        } catch {
-          // Skip jobs with fetch errors
-        }
-      }
-      setPendingApplicants(allApps);
-    } catch {
-      setPendingApplicants([]);
-    } finally {
-      setApplicantsLoading(false);
-    }
-  }, [token, user?.id, isClient]);
 
   useEffect(() => {
     fetchDashboardData();

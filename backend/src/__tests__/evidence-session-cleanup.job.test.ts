@@ -1,31 +1,36 @@
-import fs from "fs";
-import path from "path";
-import os from "os";
+import {
+  FakeEvidenceObjectStore,
+  FakeRedisStore,
+} from "./testUtils/evidenceSessionFakes";
 
-// ── 1. Set up a temporary SESSION_ROOT before any service module is imported ──
-const tempRoot = fs.mkdtempSync(
-  path.join(os.tmpdir(), "evidence-session-cleanup-test-"),
-);
-process.env.EVIDENCE_SESSION_DIR = tempRoot;
-process.env.UPLOAD_DIR = tempRoot;
+const fakeRedis = new FakeRedisStore();
+const fakeStore = new FakeEvidenceObjectStore();
 
-// ── 2. Imports (after env vars are set) ──────────────────────────────────────
+jest.mock("../lib/redis", () => ({
+  __esModule: true,
+  default: { getInstance: () => fakeRedis },
+}));
+
+jest.mock("../services/evidence-storage.service", () => ({
+  uploadEvidenceBuffer: jest.fn(async ({ key, body }: { key: string; body: Buffer }) => {
+    fakeStore.put(key, body);
+  }),
+  readEvidenceObject: jest.fn(async (key: string) => fakeStore.get(key)),
+  deleteEvidenceObjects: jest.fn(async (keys: string[]) => {
+    fakeStore.delete(keys);
+  }),
+}));
+
 import {
   initiateSession,
   getSession,
-  SESSION_ROOT,
+  saveChunk,
 } from "../services/evidence-upload-session.service";
-import {
-  sweepStaleSessions,
-  SESSION_TTL_MS,
-} from "../jobs/evidence-session-cleanup.job";
-
-// ── Helpers ──────────────────────────────────────────────────────────────────
+import { sweepStaleSessions, SESSION_TTL_MS } from "../jobs/evidence-session-cleanup.job";
 
 const OLD_CREATED_AT = new Date(Date.now() - 26 * 60 * 60 * 1000).toISOString(); // 26 h ago
-const NEW_CREATED_AT = new Date().toISOString();                                   // just now
+const NEW_CREATED_AT = new Date().toISOString(); // just now
 
-/** Build the minimal valid input for initiateSession */
 function makeInput(overrides: Partial<{ sha256: string; createdAt: string }> = {}) {
   return {
     disputeId: "dispute-sweep-test",
@@ -40,100 +45,79 @@ function makeInput(overrides: Partial<{ sha256: string; createdAt: string }> = {
   };
 }
 
-/** Back-date a session directory's mtime to look older than the TTL */
-function backdateSessionDir(sessionId: string, ageMs: number): void {
-  const dir = path.join(SESSION_ROOT, sessionId);
-  const oldTime = new Date(Date.now() - ageMs);
-  fs.utimesSync(dir, oldTime, oldTime);
-}
-
-// ── Test suite ────────────────────────────────────────────────────────────────
-
-afterAll(() => {
-  fs.rmSync(tempRoot, { recursive: true, force: true });
-});
-
 describe("sweepStaleSessions", () => {
-  it("removes a session older than the TTL that was never completed", () => {
-    // Session whose manifest records a createdAt 26 h in the past
-    const { sessionId } = initiateSession(
+  afterEach(() => {
+    fakeRedis.clear();
+    fakeStore.clear();
+  });
+
+  it("removes a session older than the TTL that was never completed", async () => {
+    const { sessionId } = await initiateSession(
       makeInput({ sha256: "1".repeat(64), createdAt: OLD_CREATED_AT }),
     );
 
-    expect(getSession(sessionId)).not.toBeNull();
+    expect(await getSession(sessionId)).not.toBeNull();
 
-    const cleaned = sweepStaleSessions(new Date(), SESSION_TTL_MS);
+    const cleaned = await sweepStaleSessions(new Date(), SESSION_TTL_MS);
 
-    expect(cleaned).toBeGreaterThanOrEqual(1);
-    expect(getSession(sessionId)).toBeNull();
-    expect(fs.existsSync(path.join(SESSION_ROOT, sessionId))).toBe(false);
+    expect(cleaned).toBe(1);
+    expect(await getSession(sessionId)).toBeNull();
   });
 
-  it("does NOT remove a fresh session still within the TTL", () => {
-    const { sessionId } = initiateSession(
+  it("does NOT remove a fresh session still within the TTL", async () => {
+    const { sessionId } = await initiateSession(
       makeInput({ sha256: "2".repeat(64), createdAt: NEW_CREATED_AT }),
     );
 
-    expect(getSession(sessionId)).not.toBeNull();
+    expect(await getSession(sessionId)).not.toBeNull();
 
-    sweepStaleSessions(new Date(), SESSION_TTL_MS);
+    await sweepStaleSessions(new Date(), SESSION_TTL_MS);
 
-    // Session must still be present — it was just created
-    expect(getSession(sessionId)).not.toBeNull();
+    expect(await getSession(sessionId)).not.toBeNull();
   });
 
-  it("removes the stale session while leaving the fresh one intact", () => {
-    // Stale: createdAt 26 h ago (past TTL)
-    const { sessionId: staleId } = initiateSession(
+  it("removes the stale session while leaving the fresh one intact", async () => {
+    const { sessionId: staleId } = await initiateSession(
       makeInput({ sha256: "3".repeat(64), createdAt: OLD_CREATED_AT }),
     );
-    // Fresh: createdAt now (within TTL)
-    const { sessionId: freshId } = initiateSession(
+    const { sessionId: freshId } = await initiateSession(
       makeInput({ sha256: "4".repeat(64), createdAt: NEW_CREATED_AT }),
     );
 
-    sweepStaleSessions(new Date(), SESSION_TTL_MS);
+    await sweepStaleSessions(new Date(), SESSION_TTL_MS);
 
-    // Stale must be gone; fresh must survive
-    expect(getSession(staleId)).toBeNull();
-    expect(getSession(freshId)).not.toBeNull();
+    expect(await getSession(staleId)).toBeNull();
+    expect(await getSession(freshId)).not.toBeNull();
   });
 
-  it("does NOT remove a session that already has an assembled.bin (completed)", () => {
-    // Even though the manifest says it's old, a completed session must not be purged
-    const { sessionId } = initiateSession(
+  it("removes a stale session's chunk bytes from the object store too", async () => {
+    const { sessionId } = await initiateSession(
       makeInput({ sha256: "5".repeat(64), createdAt: OLD_CREATED_AT }),
     );
+    await saveChunk(sessionId, 0, Buffer.alloc(1024));
+    expect(fakeStore.has(`evidence-sessions/${sessionId}/chunk_0`)).toBe(true);
 
-    // Simulate a completed upload by writing a dummy assembled.bin
-    const assembledPath = path.join(SESSION_ROOT, sessionId, "assembled.bin");
-    fs.writeFileSync(assembledPath, Buffer.alloc(0));
+    await sweepStaleSessions(new Date(), SESSION_TTL_MS);
 
-    sweepStaleSessions(new Date(), SESSION_TTL_MS);
-
-    expect(fs.existsSync(assembledPath)).toBe(true);
+    expect(fakeStore.has(`evidence-sessions/${sessionId}/chunk_0`)).toBe(false);
   });
 
-  it("removes an orphaned directory with no manifest if its mtime is past TTL", () => {
-    // Orphan: valid hex-64 name but no manifest.json (corrupt / partially initialised)
-    const orphanId = "e".repeat(64);
-    const orphanDir = path.join(SESSION_ROOT, orphanId);
-    fs.mkdirSync(orphanDir, { recursive: true });
+  it("a session already completed (removed from the index by cleanupSession) is not re-swept", async () => {
+    // The route's happy path calls cleanupSession itself once the assembled
+    // file is uploaded; simulate that by initiating and then completing the
+    // same lifecycle a completed upload would (session leaves the index).
+    const { sessionId } = await initiateSession(
+      makeInput({ sha256: "6".repeat(64), createdAt: OLD_CREATED_AT }),
+    );
+    const { cleanupSession } = await import("../services/evidence-upload-session.service");
+    await cleanupSession(sessionId);
 
-    // Back-date the directory so its mtime looks older than TTL
-    backdateSessionDir(orphanId, 26 * 60 * 60 * 1000);
-
-    const cleaned = sweepStaleSessions(new Date(), SESSION_TTL_MS);
-
-    expect(cleaned).toBeGreaterThanOrEqual(1);
-    expect(fs.existsSync(orphanDir)).toBe(false);
+    const cleaned = await sweepStaleSessions(new Date(), SESSION_TTL_MS);
+    expect(cleaned).toBe(0);
   });
 
-  it("returns 0 when SESSION_ROOT is empty", () => {
-    // After the earlier sweeps the tempRoot may still have some fresh sessions —
-    // just assert the return type and that it doesn't throw.
-    const cleaned = sweepStaleSessions(new Date(), SESSION_TTL_MS);
-    expect(typeof cleaned).toBe("number");
-    expect(cleaned).toBeGreaterThanOrEqual(0);
+  it("returns 0 when there are no active sessions", async () => {
+    const cleaned = await sweepStaleSessions(new Date(), SESSION_TTL_MS);
+    expect(cleaned).toBe(0);
   });
 });

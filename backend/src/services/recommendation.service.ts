@@ -85,6 +85,8 @@ export function categoryAffinityScore(
 export function recencyScore(createdAt: Date, now: Date = new Date()): number {
   const ageMs = now.getTime() - createdAt.getTime();
   const ageDays = ageMs / (1000 * 60 * 60 * 24);
+  // Clamp age to prevent negative values (future dates) from producing scores > 1
+  if (ageDays <= 0) return 1;
   if (ageDays >= RECENCY_WINDOW_DAYS) return 0;
   return 1 - ageDays / RECENCY_WINDOW_DAYS;
 }

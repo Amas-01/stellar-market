@@ -503,6 +503,62 @@ describe("Dispute Management System", () => {
         DisputeService.resolveDispute(disputeId, "Trying to resolve again"),
       ).rejects.toThrow("Dispute is already resolved");
     });
+
+    it("should set job status and escrowStatus to CANCELLED when outcome favors client (#1643)", async () => {
+      prismaMock.dispute.findUnique.mockResolvedValueOnce({
+        ...mockDispute,
+        votes: [],
+      });
+      prismaMock.dispute.update.mockResolvedValueOnce({
+        ...mockDispute,
+        status: DisputeStatus.RESOLVED,
+        outcome: "CLIENT",
+        resolvedAt: new Date(),
+        votes: [],
+      });
+      prismaMock.job.update.mockResolvedValueOnce({
+        ...mockJob,
+        status: JobStatus.CANCELLED,
+      });
+
+      await DisputeService.resolveDispute(disputeId, "CLIENT");
+
+      expect(prismaMock.job.update).toHaveBeenCalledWith({
+        where: { id: mockDispute.jobId },
+        data: {
+          status: JobStatus.CANCELLED,
+          escrowStatus: "CANCELLED",
+        },
+      });
+    });
+
+    it("should set job status and escrowStatus to COMPLETED when outcome favors freelancer (#1643)", async () => {
+      prismaMock.dispute.findUnique.mockResolvedValueOnce({
+        ...mockDispute,
+        votes: [],
+      });
+      prismaMock.dispute.update.mockResolvedValueOnce({
+        ...mockDispute,
+        status: DisputeStatus.RESOLVED,
+        outcome: "FREELANCER",
+        resolvedAt: new Date(),
+        votes: [],
+      });
+      prismaMock.job.update.mockResolvedValueOnce({
+        ...mockJob,
+        status: JobStatus.COMPLETED,
+      });
+
+      await DisputeService.resolveDispute(disputeId, "FREELANCER");
+
+      expect(prismaMock.job.update).toHaveBeenCalledWith({
+        where: { id: mockDispute.jobId },
+        data: {
+          status: JobStatus.COMPLETED,
+          escrowStatus: "COMPLETED",
+        },
+      });
+    });
   });
 
   describe("processWebhook", () => {

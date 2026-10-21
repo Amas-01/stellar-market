@@ -68,7 +68,14 @@ export default function JobReviewPage() {
     if (!job) return null;
 
     const storedUserRaw = localStorage.getItem("stellarmarket_user");
-    const storedUser = storedUserRaw ? (JSON.parse(storedUserRaw) as any) : null;
+    let storedUser: { id?: string; [key: string]: unknown } | null = null;
+    if (storedUserRaw) {
+      try {
+        storedUser = JSON.parse(storedUserRaw) as { id?: string };
+      } catch {
+        storedUser = null;
+      }
+    }
 
     const isClient = Boolean(storedUser && storedUser.id === job.client.id);
     if (!job.freelancer) return null;

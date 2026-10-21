@@ -156,6 +156,30 @@ describe("GET /api/disputes — user scoping (#803)", () => {
     expect(res.body).toEqual([]);
   });
 
+  it("passes a non-default status query param to the service (#1378)", async () => {
+    mockUserId = "admin-1";
+    mockUserRole = "ADMIN";
+
+    await request(app).get("/api/disputes?status=RESOLVED");
+
+    expect(mockGetDisputes).toHaveBeenCalledWith(
+      expect.objectContaining({ status: "RESOLVED" }),
+      expect.any(Object),
+    );
+  });
+
+  it("defaults status to OPEN when omitted (#1378)", async () => {
+    mockUserId = "admin-1";
+    mockUserRole = "ADMIN";
+
+    await request(app).get("/api/disputes");
+
+    expect(mockGetDisputes).toHaveBeenCalledWith(
+      expect.objectContaining({ status: "OPEN" }),
+      expect.any(Object),
+    );
+  });
+
   it("returns 403 for unrecognised roles", async () => {
     mockUserId = "unknown-1";
     mockUserRole = "UNKNOWN_ROLE";

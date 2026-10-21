@@ -158,7 +158,7 @@ export default function JobCard({
           <Tag size={12} />
           {job.category}
         </button>
-        {job.skills.slice(0, 4).map((skill) => (
+        {(job.skills ?? []).slice(0, 4).map((skill) => (
           <button
             key={skill}
             type="button"

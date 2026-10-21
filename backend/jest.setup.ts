@@ -1,5 +1,13 @@
 // Jest setup file — intentionally minimal
 
+// ─── Environment Variables for Tests ─────────────────────────────────────────
+process.env.ENCRYPTION_KEY =
+  process.env.ENCRYPTION_KEY ||
+  "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+process.env.NATIVE_TOKEN_ID =
+  process.env.NATIVE_TOKEN_ID ||
+  "CDLZFC3SYJYDZT7K67VZ75HPJVIEUVNIXF47ZG2FB2RMQQVU2HHGCYSC";
+
 // ─── src/config/redis ────────────────────────────────────────────────────────
 // Prevent Redis TCP connections during tests.
 //
@@ -59,6 +67,12 @@ const mockRedisInstance = {
   disconnect: jest.fn(),
   status: "ready",
 };
+// notification-queue.ts and recommendation-queue.service.ts each duplicate the
+// shared client into a dedicated blocking-safe connection for their BullMQ
+// Worker; the mock doesn't need a distinct connection, so hand back itself.
+(mockRedisInstance as unknown as { duplicate: jest.Mock }).duplicate = jest
+  .fn()
+  .mockReturnValue(mockRedisInstance);
 
 jest.mock("./src/lib/redis", () => ({
   __esModule: true,

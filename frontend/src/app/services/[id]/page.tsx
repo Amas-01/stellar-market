@@ -50,7 +50,7 @@ export default function ServiceDetailPage() {
     );
   }
 
-  const averageRating = service.freelancer.averageRating || 0;
+  const averageRating = (service.freelancer.averageRating || 0).toFixed(1);
   const reviewCount = service.freelancer.reviewCount || 0;
 
   return (
@@ -131,8 +131,8 @@ export default function ServiceDetailPage() {
               </div>
             </div>
 
-            <button 
-              onClick={() => router.push(`/messages?recipientId=${service.freelancerId}`)}
+            <button
+              onClick={() => router.push(`/messages/${service.freelancerId}-no-job`)}
               className="btn-primary w-full flex items-center justify-center gap-2 h-12"
             >
               Contact Freelancer <MessageSquare size={20} />

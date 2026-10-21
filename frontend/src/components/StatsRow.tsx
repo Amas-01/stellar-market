@@ -1,11 +1,11 @@
 import React from "react";
 import { useQuery } from "@tanstack/react-query";
 import axios from "axios";
-import { Briefcase, CheckCircle2, DollarSign, Star } from "lucide-react";
+import { AlertCircle, Briefcase, CheckCircle2, DollarSign, Star } from "lucide-react";
 import { DashboardStatsSkeleton } from "./skeletons/DashboardSkeleton";
 import { useAuth } from "@/context/AuthContext";
 
-const API = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:5000/api";
+const API = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:5000/api/v1";
 
 interface FreelancerStats {
   totalEarnedXlm: number;
@@ -34,9 +34,20 @@ export default function StatsRow() {
     return <DashboardStatsSkeleton />;
   }
 
-  if (error || !stats) {
-    // Graceful fallback or error state could be handled here.
-    return null; 
+  if (error) {
+    return (
+      <div
+        role="alert"
+        className="card flex items-center gap-3 mb-8 text-theme-error"
+      >
+        <AlertCircle size={20} />
+        <span className="text-sm">Couldn&apos;t load stats</span>
+      </div>
+    );
+  }
+
+  if (!stats) {
+    return null;
   }
 
   const statCards = [

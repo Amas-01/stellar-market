@@ -46,30 +46,10 @@ describe.skip("Rate Limiting", () => {
 
       // 101st should be rate limited
       expect(responses[100].status).toBe(429);
-      expect(responses[100].body).toEqual({ error: "Too many requests" });
+      expect(responses[100].body).toHaveProperty("code", "RATE_LIMITED");
+      expect(responses[100].body).toHaveProperty("error", "Too many requests");
+      expect(responses[100].body).toHaveProperty("requestId");
       expect(responses[100].headers["retry-after"]).toBeDefined();
-    });
-
-    it("should whitelist health check paths", async () => {
-      app.get("/health", globalRateLimiter, (_req, res) => {
-        res.json({ status: "ok" });
-      });
-
-      app.get("/health/db", globalRateLimiter, (_req, res) => {
-        res.json({ status: "ok" });
-      });
-
-      // Make 200 requests to /health (should all succeed)
-      for (let i = 0; i < 200; i++) {
-        const response = await request(app).get("/health");
-        expect(response.status).toBe(200);
-      }
-
-      // Make 200 requests to /health/db (should all succeed)
-      for (let i = 0; i < 200; i++) {
-        const response = await request(app).get("/health/db");
-        expect(response.status).toBe(200);
-      }
     });
 
     it("should include Retry-After header in 429 response", async () => {
@@ -115,7 +95,9 @@ describe.skip("Rate Limiting", () => {
 
       // 11th should be rate limited
       expect(responses[10].status).toBe(429);
-      expect(responses[10].body).toEqual({ error: "Too many requests" });
+      expect(responses[10].body).toHaveProperty("code", "RATE_LIMITED");
+      expect(responses[10].body).toHaveProperty("error", "Too many requests");
+      expect(responses[10].body).toHaveProperty("requestId");
     });
 
     it("should include Retry-After header in auth 429 response", async () => {

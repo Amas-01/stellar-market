@@ -4,7 +4,7 @@ type Props = { userPromise: Promise<any> };
 
 export default async function EarningsSummary({ userPromise }: Props) {
   const user = await userPromise;
-  const res = await fetch(`${API_URL}/freelancer/earnings/summary?freelancerId=${encodeURIComponent(user.id)}`, {
+  const res = await fetch(`${API_URL}/freelancers/earnings/summary?freelancerId=${encodeURIComponent(user.id)}`, {
     next: { revalidate: 60 },
   });
   const summary = res.ok ? await res.json() : null;
@@ -14,7 +14,7 @@ export default async function EarningsSummary({ userPromise }: Props) {
       <h3 className="text-lg font-semibold mb-3">Earnings</h3>
       {summary ? (
         <div>
-          <div className="text-2xl font-bold">{summary.total ?? 0}</div>
+          <div className="text-2xl font-bold">{(summary.total ?? 0).toLocaleString()} XLM</div>
           <div className="text-sm text-theme-text/60">Total earnings</div>
         </div>
       ) : (

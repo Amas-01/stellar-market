@@ -667,6 +667,15 @@ export class ContractService {
       await fs.mkdir(dir, { recursive: true });
       const filename = path.join(dir, `${Date.now()}.xdr.txt`);
       await fs.writeFile(filename, xdrBase64, "utf8");
+
+      // Retention: keep at most 50 files, remove oldest excess
+      const MAX_DUMP_FILES = 50;
+      const files = await fs.readdir(dir);
+      if (files.length > MAX_DUMP_FILES) {
+        const sorted = files.sort();
+        const toDelete = sorted.slice(0, files.length - MAX_DUMP_FILES);
+        await Promise.all(toDelete.map((f) => fs.unlink(path.join(dir, f)).catch(() => {})));
+      }
     } catch {
       // best-effort; never let logging break the main flow
     }

@@ -334,7 +334,7 @@ export class DisputeService {
     });
 
     if (!dispute) {
-      throw new Error("Dispute not found");
+      throw createError("Dispute not found", 404);
     }
 
     const votes = await prisma.disputeVote.findMany({
@@ -605,16 +605,16 @@ export class DisputeService {
     });
 
     if (!dispute) {
-      throw new Error("Dispute not found");
+      throw createError("Dispute not found", 404);
     }
 
     if (dispute.status === DisputeStatus.RESOLVED) {
-      throw new Error("Cannot vote on a resolved dispute");
+      throw createError("Cannot vote on a resolved dispute", 409);
     }
 
     // Prevent participants from voting
     if (voterId === dispute.clientId || voterId === dispute.freelancerId) {
-      throw new Error("Dispute participants cannot vote");
+      throw createError("Dispute participants cannot vote", 403);
     }
 
     // Check for duplicate vote
@@ -628,7 +628,7 @@ export class DisputeService {
     });
 
     if (existingVote) {
-      throw new Error("You have already voted on this dispute");
+      throw createError("You have already voted on this dispute", 409);
     }
 
     // Create vote
@@ -704,11 +704,11 @@ export class DisputeService {
     });
 
     if (!dispute) {
-      throw new Error("Dispute not found");
+      throw createError("Dispute not found", 404);
     }
 
     if (dispute.status === DisputeStatus.RESOLVED) {
-      throw new Error("Dispute is already resolved");
+      throw createError("Dispute is already resolved", 409);
     }
 
     // Update dispute
@@ -730,11 +730,12 @@ export class DisputeService {
     });
 
     // Update job status
+    const isClientFavor = outcome === "CLIENT" || outcome === "ResolvedForClient";
     await prisma.job.update({
       where: { id: dispute.jobId },
       data: {
-        status: JobStatus.COMPLETED,
-        escrowStatus: "COMPLETED",
+        status: isClientFavor ? JobStatus.CANCELLED : JobStatus.COMPLETED,
+        escrowStatus: isClientFavor ? "CANCELLED" : "COMPLETED",
       },
     });
 
@@ -806,7 +807,7 @@ export class DisputeService {
     switch (type) {
       case "DISPUTE_RAISED":
         if (!onChainDisputeId || !disputeId) {
-          throw new Error("Missing required fields for DISPUTE_RAISED");
+          throw createError("Missing required fields for DISPUTE_RAISED", 400);
         }
         // Update dispute with on-chain ID
         await prisma.dispute.update({
@@ -822,20 +823,20 @@ export class DisputeService {
 
       case "VOTE_CAST":
         if (!disputeId || !voterId || !choice) {
-          throw new Error("Missing required fields for VOTE_CAST");
+          throw createError("Missing required fields for VOTE_CAST", 400);
         }
         // Vote should already be recorded via API, this is confirmation
         break;
 
       case "DISPUTE_RESOLVED":
         if (!disputeId || !outcome) {
-          throw new Error("Missing required fields for DISPUTE_RESOLVED");
+          throw createError("Missing required fields for DISPUTE_RESOLVED", 400);
         }
         await this.resolveDispute(disputeId, outcome);
         break;
 
       default:
-        throw new Error(`Unknown webhook type: ${type}`);
+        throw createError(`Unknown webhook type: ${type}`, 400);
     }
 
     return { success: true, message: `Webhook ${type} processed successfully` };

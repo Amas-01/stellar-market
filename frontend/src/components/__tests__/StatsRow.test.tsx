@@ -75,11 +75,21 @@ describe("StatsRow component", () => {
     expect(screen.getByText("20 reviews")).toBeInTheDocument();
 
     expect(mockedAxios.get).toHaveBeenCalledWith(
-      expect.stringContaining("/freelancers/me/stats"),
+      "http://localhost:5000/api/v1/freelancers/me/stats",
       expect.objectContaining({
         headers: { Authorization: "Bearer fake-token" },
       })
     );
+  });
+
+  it("shows an error message when the fetch fails", async () => {
+    (useAuth as jest.Mock).mockReturnValue({ token: "fake-token" });
+    mockedAxios.get.mockRejectedValueOnce(new Error("boom"));
+
+    renderComponent();
+
+    expect(await screen.findByText("Couldn't load stats")).toBeInTheDocument();
+    expect(screen.getByRole("alert")).toBeInTheDocument();
   });
 
   it("does not fetch if token is missing", () => {

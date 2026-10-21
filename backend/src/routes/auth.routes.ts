@@ -34,6 +34,7 @@ import RedisClient from "../lib/redis";
 import { invalidateTokenVersionCache } from "../lib/token-version";
 import { generateToken, hashToken } from "../utils/token";
 import { sendPasswordResetEmail, sendVerificationEmail } from "../utils/email";
+import { logger } from "../lib/logger";
 
 const ACCESS_TOKEN_EXPIRY = "15m";
 const REFRESH_TOKEN_EXPIRY_MS = 7 * 24 * 60 * 60 * 1000; // 7 days
@@ -100,6 +101,7 @@ function userPayload(user: {
   role: "CLIENT" | "FREELANCER" | "ADMIN";
   emailVerified?: boolean;
   password?: string | null;
+  completedOnboarding?: boolean;
 }) {
   return {
     id: user.id,
@@ -108,6 +110,7 @@ function userPayload(user: {
     email: user.email,
     role: user.role,
     emailVerified: user.emailVerified,
+    completedOnboarding: user.completedOnboarding,
     authMethods: {
       email: Boolean(user.email && user.password),
       wallet: Boolean(user.walletAddress),
@@ -282,11 +285,24 @@ router.post(
       },
     });
 
-    if (email) {
+    let emailSent = false;
+    try {
       await sendVerificationEmail(email, rawToken);
+      emailSent = true;
+    } catch (err) {
+      logger.error({ err, userId: user.id }, "Failed to send verification email on registration");
     }
 
-    await sendSession(res, user, 201);
+    // No session is issued here on purpose — the user isn't logged in until
+    // they click the verification link (see GET /verify-email/:token), which
+    // is what actually establishes the session.
+    res.status(201).json({
+      message: emailSent
+        ? "Account created. Check your email to verify before logging in."
+        : "Account created, but we couldn't send the verification email right now. Use the resend option to try again.",
+      email: user.email,
+      emailSent,
+    });
   }),
 );
 
@@ -327,6 +343,33 @@ router.post(
     }
 
     await sendSession(res, user);
+  }),
+);
+
+/**
+ * GET /auth/wallet/exists?address=...
+ * Tells the client, before it commits to signing a login message, whether an
+ * account already exists for a wallet address — purely so the UI can warn
+ * "this will create a new account" instead of silently doing so for a wallet
+ * the user only meant to link to an account they already have. Returns only
+ * a boolean; no account details are exposed.
+ */
+router.get(
+  "/wallet/exists",
+  loginRateLimiter,
+  asyncHandler(async (req: Request, res: Response) => {
+    const address = typeof req.query.address === "string" ? req.query.address : "";
+    try {
+      Keypair.fromPublicKey(address);
+    } catch {
+      return res.status(400).json({ error: "Invalid Stellar address." });
+    }
+
+    const user = await prisma.user.findUnique({
+      where: { walletAddress: address },
+      select: { id: true },
+    });
+    res.json({ exists: !!user });
   }),
 );
 
@@ -811,6 +854,12 @@ router.post(
         tokenVersion: { increment: 1 },
       },
     });
+    
+    await prisma.refreshToken.updateMany({
+      where: { userId: user.id },
+      data: { revoked: true },
+    });
+    
     await invalidateTokenVersionCache(user.id);
 
     res.json({ message: "Password has been reset successfully." });
@@ -847,6 +896,12 @@ router.post(
       },
       select: { id: true, tokenVersion: true },
     });
+    
+    await prisma.refreshToken.updateMany({
+      where: { userId: user.id },
+      data: { revoked: true },
+    });
+    
     await invalidateTokenVersionCache(user.id);
 
     // Re-issue this session with the new tokenVersion so the caller is not
@@ -856,6 +911,41 @@ router.post(
     setRefreshCookie(res, refreshRaw);
 
     res.json({ message: "Password changed successfully.", token });
+  }),
+);
+
+// Resend verification email — no session required. A freshly registered
+// user has no token yet (registration no longer auto-logs in), so this is
+// their only way to retry if the first send failed or the email is lost.
+// Always returns the same generic message to avoid leaking which emails
+// are registered, same as /forgot-password.
+router.post(
+  "/resend-verification",
+  forgotPasswordRateLimiter,
+  validate({ body: forgotPasswordSchema }),
+  asyncHandler(async (req: Request, res: Response) => {
+    const { email } = req.body;
+    const genericMessage = "If that email is registered and not yet verified, a new verification link has been sent.";
+
+    const user = await prisma.user.findUnique({ where: { email } });
+    if (!user || user.emailVerified) {
+      return res.json({ message: genericMessage });
+    }
+
+    const rawToken = generateToken();
+    const hashed = hashToken(rawToken);
+    await prisma.user.update({
+      where: { id: user.id },
+      data: { emailVerificationToken: hashed },
+    });
+
+    try {
+      await sendVerificationEmail(email, rawToken);
+    } catch (err) {
+      logger.error({ err, userId: user.id }, "Failed to resend verification email");
+    }
+
+    res.json({ message: genericMessage });
   }),
 );
 
@@ -884,7 +974,14 @@ router.post(
       data: { emailVerificationToken: hashed },
     });
 
-    await sendVerificationEmail(user.email, rawToken);
+    try {
+      await sendVerificationEmail(user.email, rawToken);
+    } catch (err) {
+      logger.error({ err, userId: user.id }, "Failed to send verification email on resend");
+      return res.status(502).json({
+        error: "Could not send verification email. Please try again shortly.",
+      });
+    }
 
     res.json({ message: "Verification email sent." });
   }),
@@ -960,7 +1057,7 @@ router.get(
       return res.status(400).json({ error: "Invalid verification token." });
     }
 
-    await prisma.user.update({
+    const verifiedUser = await prisma.user.update({
       where: { id: user.id },
       data: {
         emailVerified: true,
@@ -968,7 +1065,10 @@ router.get(
       },
     });
 
-    res.json({ message: "Email verified successfully." });
+    // Registration no longer logs the user in on its own — this is the step
+    // that actually establishes their first session, now that ownership of
+    // the email is proven.
+    await sendSession(res, verifiedUser);
   }),
 );
 

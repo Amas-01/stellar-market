@@ -30,7 +30,7 @@ export const getUsersQuerySchema = paginationSchema.extend({
 export const getUserJobsQuerySchema = paginationSchema;
 
 export const getUserByIdParamSchema = z.object({
-  id: z.string().min(1, "User ID is required"),
+  id: z.string().cuid("Invalid id format"),
 });
 
 export const updateCurrentUserProfileSchema = z.object({

@@ -8,6 +8,15 @@ import { Milestone } from "@/types";
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:5000/api/v1";
 
+const MIN_EXTENSION_MS = 24 * 60 * 60 * 1000;
+
+// Format a Date as the local "YYYY-MM-DDTHH:mm" string a datetime-local input expects.
+// Using toISOString() here would emit the UTC date and drop the time-of-day.
+const toLocalDateTimeInput = (date: Date) => {
+  const pad = (n: number) => String(n).padStart(2, "0");
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}T${pad(date.getHours())}:${pad(date.getMinutes())}`;
+};
+
 type DeadlineExtensionModalProps = {
   milestone: Milestone;
   jobId: string;
@@ -38,11 +47,14 @@ export default function DeadlineExtensionModal({
   const currentDeadline = milestone.contractDeadline
     ? new Date(milestone.contractDeadline)
     : null;
-  const minDeadline = currentDeadline
-    ? new Date(currentDeadline.getTime() + 24 * 60 * 60 * 1000) // At least 24 hours from current
-    : new Date(Date.now() + 24 * 60 * 60 * 1000);
+  const rawMinDeadline = currentDeadline
+    ? currentDeadline.getTime() + MIN_EXTENSION_MS // At least 24 hours from current
+    : Date.now() + MIN_EXTENSION_MS;
+  // datetime-local only has minute precision, so round up to the next whole minute
+  // to keep the native min attribute and the JS check in agreement.
+  const minDeadline = new Date(Math.ceil(rawMinDeadline / 60000) * 60000);
 
-  const minDeadlineStr = minDeadline.toISOString().split("T")[0];
+  const minDeadlineStr = toLocalDateTimeInput(minDeadline);
 
   const trimmedReason = reason.trim();
   const reasonError =
@@ -56,7 +68,7 @@ export default function DeadlineExtensionModal({
     newDeadline &&
     !processing &&
     !reasonError &&
-    new Date(newDeadline) > (currentDeadline || new Date());
+    new Date(newDeadline) >= minDeadline;
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -67,8 +79,12 @@ export default function DeadlineExtensionModal({
       return;
     }
 
-    if (new Date(newDeadline) <= (currentDeadline || new Date())) {
-      setError("New deadline must be after the current deadline.");
+    if (new Date(newDeadline) < minDeadline) {
+      setError(
+        currentDeadline
+          ? "New deadline must be at least 24 hours after the current deadline."
+          : "New deadline must be at least 24 hours from now.",
+      );
       return;
     }
 

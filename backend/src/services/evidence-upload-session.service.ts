@@ -1,7 +1,14 @@
 import crypto from "crypto";
 import fs from "fs";
+import os from "os";
 import path from "path";
-import { UPLOAD_DIR, MAX_FILE_SIZE } from "../config/upload";
+import { MAX_FILE_SIZE } from "../config/upload";
+import RedisClient from "../lib/redis";
+import {
+  deleteEvidenceObjects,
+  readEvidenceObject,
+  uploadEvidenceBuffer,
+} from "./evidence-storage.service";
 
 /**
  * Chunked / resumable evidence upload sessions.
@@ -9,10 +16,16 @@ import { UPLOAD_DIR, MAX_FILE_SIZE } from "../config/upload";
  * A session is a single file being uploaded to a single dispute by a single
  * uploader. Chunk boundaries mirror the 2 MB boundaries the client already uses
  * for SHA-256 hashing, so the network transfer and the integrity proof share the
- * same unit of progress. Session state lives entirely on disk under
- * SESSION_ROOT/<sessionId>/, so "which chunks are already here" is derived from
- * the filesystem (a completed rename) rather than trusted client state. That
- * makes resume deterministic: same inputs -> same received-chunk set.
+ * same unit of progress.
+ *
+ * Session state (the manifest and the set of received chunk indexes) lives in
+ * Redis, and chunk bytes live in the same S3-compatible object store the
+ * assembled file is eventually uploaded to. Both are reachable from every
+ * backend instance, so a chunked upload survives being load-balanced across a
+ * different instance on every request — unlike storing this on local disk,
+ * where a request landing on an instance that didn't handle an earlier step
+ * would see "Session not found" or "Missing chunk N" even though the upload
+ * is, from the client's point of view, proceeding normally.
  */
 
 export const CHUNK_SIZE = 2 * 1024 * 1024; // 2 MB, matches client hashing chunks
@@ -21,13 +34,14 @@ export const MAX_CHUNK_SIZE = 4 * 1024 * 1024; // upper bound accepted per chunk
 export const MAX_TOTAL_CHUNKS = 64;
 export const MIN_CHUNK_SIZE = 256 * 1024; // 256 KB floor to bound chunk count
 
-export const SESSION_ROOT =
-  process.env.EVIDENCE_SESSION_DIR ||
-  path.join(UPLOAD_DIR, "evidence-sessions");
+const MANIFEST_KEY_PREFIX = "evidence-session:manifest:";
+const CHUNKS_KEY_PREFIX = "evidence-session:chunks:";
+/** Every active session id, so the cleanup sweep never needs a Redis KEYS/SCAN over the whole keyspace. */
+const SESSION_INDEX_KEY = "evidence-sessions:index";
+const CHUNK_OBJECT_PREFIX = "evidence-sessions";
 
-if (!fs.existsSync(SESSION_ROOT)) {
-  fs.mkdirSync(SESSION_ROOT, { recursive: true });
-}
+/** Where `assembleAndVerify` writes the concatenated file for the single request that reads it back. */
+const ASSEMBLE_TMP_ROOT = path.join(os.tmpdir(), "evidence-assemble");
 
 export interface SessionManifest {
   sessionId: string;
@@ -64,17 +78,19 @@ function assertSafeSessionId(sessionId: string): void {
   }
 }
 
-function sessionDir(sessionId: string): string {
+function manifestKey(sessionId: string): string {
   assertSafeSessionId(sessionId);
-  return path.join(SESSION_ROOT, sessionId);
+  return `${MANIFEST_KEY_PREFIX}${sessionId}`;
 }
 
-function manifestPath(sessionId: string): string {
-  return path.join(sessionDir(sessionId), "manifest.json");
+function chunksKey(sessionId: string): string {
+  assertSafeSessionId(sessionId);
+  return `${CHUNKS_KEY_PREFIX}${sessionId}`;
 }
 
-function chunkPath(sessionId: string, index: number): string {
-  return path.join(sessionDir(sessionId), `chunk_${index}`);
+function chunkObjectKey(sessionId: string, index: number): string {
+  assertSafeSessionId(sessionId);
+  return `${CHUNK_OBJECT_PREFIX}/${sessionId}/chunk_${index}`;
 }
 
 /**
@@ -122,50 +138,43 @@ export function validateInitiateInput(
   return null;
 }
 
-export function getSession(sessionId: string): SessionManifest | null {
-  const mp = manifestPath(sessionId);
-  if (!fs.existsSync(mp)) return null;
+export async function getSession(sessionId: string): Promise<SessionManifest | null> {
+  const raw = await RedisClient.getInstance().get(manifestKey(sessionId));
+  if (!raw) return null;
   try {
-    return JSON.parse(fs.readFileSync(mp, "utf-8")) as SessionManifest;
+    return JSON.parse(raw) as SessionManifest;
   } catch {
     return null;
   }
 }
 
 /**
- * Which chunk indexes are already fully persisted. A chunk only counts once its
- * atomic rename from chunk_N.part -> chunk_N has completed, so a crash mid-write
- * never makes a partial chunk look complete.
+ * Which chunk indexes are already fully persisted. A chunk only counts once
+ * its upload to the object store has completed, so a crash mid-upload never
+ * makes a partial chunk look complete.
  */
-export function getReceivedChunks(sessionId: string): number[] {
-  const dir = sessionDir(sessionId);
-  if (!fs.existsSync(dir)) return [];
-  const received: number[] = [];
-  for (const name of fs.readdirSync(dir)) {
-    const m = /^chunk_(\d+)$/.exec(name);
-    if (m) received.push(Number(m[1]));
-  }
-  return received.sort((a, b) => a - b);
+export async function getReceivedChunks(sessionId: string): Promise<number[]> {
+  const members = await RedisClient.getInstance().smembers(chunksKey(sessionId));
+  return members.map(Number).sort((a, b) => a - b);
 }
 
 /**
  * Create the session if new, or return the existing one (idempotent). When a
- * session already exists for the derived id we treat the on-disk manifest as
+ * session already exists for the derived id we treat the stored manifest as
  * authoritative unless the declared file identity (hash/size/chunking) differs,
  * in which case the stale session is discarded and recreated.
  */
-export function initiateSession(input: InitiateInput): {
+export async function initiateSession(input: InitiateInput): Promise<{
   sessionId: string;
   manifest: SessionManifest;
   receivedChunks: number[];
-} {
+}> {
   const sessionId = deriveSessionId(
     input.disputeId,
     input.uploaderId,
     input.sha256,
   );
-  const dir = sessionDir(sessionId);
-  const existing = getSession(sessionId);
+  const existing = await getSession(sessionId);
 
   const identityMatches =
     existing &&
@@ -178,16 +187,15 @@ export function initiateSession(input: InitiateInput): {
     return {
       sessionId,
       manifest: existing,
-      receivedChunks: getReceivedChunks(sessionId),
+      receivedChunks: await getReceivedChunks(sessionId),
     };
   }
 
   if (existing && !identityMatches) {
     // Same id, different file identity: wipe and start clean.
-    fs.rmSync(dir, { recursive: true, force: true });
+    await cleanupSession(sessionId);
   }
 
-  fs.mkdirSync(dir, { recursive: true });
   const manifest: SessionManifest = {
     sessionId,
     disputeId: input.disputeId,
@@ -201,7 +209,10 @@ export function initiateSession(input: InitiateInput): {
     anchorTxHash: input.anchorTxHash ?? null,
     createdAt: input.createdAt,
   };
-  fs.writeFileSync(manifestPath(sessionId), JSON.stringify(manifest));
+
+  const redis = RedisClient.getInstance();
+  await redis.set(manifestKey(sessionId), JSON.stringify(manifest));
+  await redis.sadd(SESSION_INDEX_KEY, sessionId);
 
   return { sessionId, manifest, receivedChunks: [] };
 }
@@ -210,12 +221,12 @@ export function initiateSession(input: InitiateInput): {
  * Persist one chunk. Idempotent: re-sending an already-stored chunk is a no-op
  * success, which is exactly what a retry after an ambiguous failure needs.
  */
-export function saveChunk(
+export async function saveChunk(
   sessionId: string,
   index: number,
   data: Buffer,
-): { receivedChunks: number[] } {
-  const manifest = getSession(sessionId);
+): Promise<{ receivedChunks: number[] }> {
+  const manifest = await getSession(sessionId);
   if (!manifest) throw new Error("Session not found");
 
   if (!Number.isInteger(index) || index < 0 || index >= manifest.totalChunks) {
@@ -229,12 +240,14 @@ export function saveChunk(
     throw new Error("Non-final chunk must be exactly chunkSize bytes");
   }
 
-  const finalPath = chunkPath(sessionId, index);
-  const tmpPath = `${finalPath}.part`;
-  fs.writeFileSync(tmpPath, data);
-  fs.renameSync(tmpPath, finalPath); // atomic publish
+  await uploadEvidenceBuffer({
+    key: chunkObjectKey(sessionId, index),
+    body: data,
+    contentType: "application/octet-stream",
+  });
+  await RedisClient.getInstance().sadd(chunksKey(sessionId), String(index));
 
-  return { receivedChunks: getReceivedChunks(sessionId) };
+  return { receivedChunks: await getReceivedChunks(sessionId) };
 }
 
 export interface AssembledFile {
@@ -249,23 +262,33 @@ export interface AssembledFile {
  * SHA-256 over the assembled bytes. `verified` is true only when the recomputed
  * hash matches the client-declared hash, so a resumed/retried upload that
  * silently corrupted a chunk cannot pass as "matching" the original.
+ *
+ * The assembled file is written to local disk under a path scoped to this
+ * session, unlike the chunks and manifest — but that's fine here: it exists
+ * only for the lifetime of this one request (assemble -> validate -> upload
+ * to its final S3 key -> delete), on whichever instance happened to handle
+ * the /complete call. It never needs to be visible to a different instance.
  */
-export function assembleAndVerify(sessionId: string): AssembledFile {
-  const manifest = getSession(sessionId);
+export async function assembleAndVerify(sessionId: string): Promise<AssembledFile> {
+  const manifest = await getSession(sessionId);
   if (!manifest) throw new Error("Session not found");
 
-  const received = new Set(getReceivedChunks(sessionId));
+  const received = new Set(await getReceivedChunks(sessionId));
   for (let i = 0; i < manifest.totalChunks; i++) {
     if (!received.has(i)) throw new Error(`Missing chunk ${i}`);
   }
 
-  const assembledPath = path.join(sessionDir(sessionId), "assembled.bin");
+  assertSafeSessionId(sessionId);
+  const assembleDir = path.join(ASSEMBLE_TMP_ROOT, sessionId);
+  fs.mkdirSync(assembleDir, { recursive: true });
+  const assembledPath = path.join(assembleDir, "assembled.bin");
+
   const out = fs.openSync(assembledPath, "w");
   const hash = crypto.createHash("sha256");
   let assembledSize = 0;
   try {
     for (let i = 0; i < manifest.totalChunks; i++) {
-      const buf = fs.readFileSync(chunkPath(sessionId, i));
+      const buf = await readEvidenceObject(chunkObjectKey(sessionId, i));
       fs.writeSync(out, buf);
       hash.update(buf);
       assembledSize += buf.length;
@@ -281,9 +304,37 @@ export function assembleAndVerify(sessionId: string): AssembledFile {
   return { filePath: assembledPath, computedSha256, verified, manifest };
 }
 
-export function cleanupSession(sessionId: string): void {
-  const dir = sessionDir(sessionId);
-  if (fs.existsSync(dir)) {
-    fs.rmSync(dir, { recursive: true, force: true });
-  }
+/**
+ * Discards all state for a session: the Redis manifest and received-chunk
+ * set, its S3 chunk objects, its entry in the active-session index, and its
+ * local assemble temp dir (if `assembleAndVerify` ran for it). Safe to call
+ * on a session that doesn't exist, or was never assembled.
+ */
+export async function cleanupSession(sessionId: string): Promise<void> {
+  assertSafeSessionId(sessionId);
+  const redis = RedisClient.getInstance();
+
+  const [manifest, receivedChunks] = await Promise.all([
+    getSession(sessionId),
+    getReceivedChunks(sessionId),
+  ]);
+
+  const totalChunks = manifest?.totalChunks ?? 0;
+  const chunkIndexes = new Set([...receivedChunks, ...Array.from({ length: totalChunks }, (_, i) => i)]);
+  const objectKeys = Array.from(chunkIndexes, (i) => chunkObjectKey(sessionId, i));
+
+  await Promise.all([
+    deleteEvidenceObjects(objectKeys),
+    redis.del(manifestKey(sessionId)),
+    redis.del(chunksKey(sessionId)),
+    redis.srem(SESSION_INDEX_KEY, sessionId),
+  ]);
+
+  const assembleDir = path.join(ASSEMBLE_TMP_ROOT, sessionId);
+  fs.rmSync(assembleDir, { recursive: true, force: true });
+}
+
+/** Every session id still in the active index — the sweep job's candidate set. */
+export async function listActiveSessionIds(): Promise<string[]> {
+  return RedisClient.getInstance().smembers(SESSION_INDEX_KEY);
 }

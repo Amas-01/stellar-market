@@ -1,6 +1,7 @@
-import { Request, Response, NextFunction } from "express";
+import { Response, NextFunction } from "express";
 import RedisClient from "../lib/redis";
 import { logger } from "../lib/logger";
+import { AuthRequest } from "./auth";
 
 const IDEMPOTENCY_TTL = 24 * 60 * 60;
 
@@ -9,7 +10,7 @@ const IN_FLIGHT_TTL = 30;
 export function idempotency(options: { ttl?: number } = {}) {
   const ttl = options.ttl ?? IDEMPOTENCY_TTL;
 
-  return async (req: Request, res: Response, next: NextFunction) => {
+  return async (req: AuthRequest, res: Response, next: NextFunction) => {
     const key = req.headers["idempotency-key"] as string | undefined;
 
     if (!key) {
@@ -17,7 +18,9 @@ export function idempotency(options: { ttl?: number } = {}) {
       return;
     }
 
-    const redisKey = `idempotency:${key}`;
+    const userId = req.userId || "anonymous";
+    const routeScope = `${req.method}:${req.path}`;
+    const redisKey = `idempotency:${userId}:${routeScope}:${key}`;
 
     try {
       if (!RedisClient.isRedisConnected()) {
@@ -44,11 +47,21 @@ export function idempotency(options: { ttl?: number } = {}) {
 
       const originalJson = res.json.bind(res);
       res.json = function (body: unknown) {
-        redis
-          .setex(redisKey, ttl, JSON.stringify({ status: "completed", response: body }))
-          .catch((err) =>
-            logger.warn({ err, redisKey }, "Failed to store idempotency key"),
-          );
+        // Only cache successful responses (2xx/3xx); errors should not be cached
+        if (res.statusCode < 400) {
+          redis
+            .setex(redisKey, ttl, JSON.stringify({ status: "completed", response: body }))
+            .catch((err) =>
+              logger.warn({ err, redisKey }, "Failed to store idempotency key"),
+            );
+        } else {
+          // For error responses, delete the in-flight marker so retries can re-execute
+          redis
+            .del(redisKey)
+            .catch((err) =>
+              logger.warn({ err, redisKey }, "Failed to delete in-flight idempotency key"),
+            );
+        }
         return originalJson(body);
       };
 

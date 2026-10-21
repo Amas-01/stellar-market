@@ -190,7 +190,9 @@ stellar contract invoke \
   --min_votes 3 \
   --tie_break_method "Escalate"
 
-# cast_vote(dispute_id, voter, choice, reason)
+# cast_vote(dispute_id, voter, choice, reason, nonce)
+# Use a fresh nonce for each cast_vote call by the same voter, even across disputes.
+# The contract rejects reused nonces during the replay-protection window.
 stellar contract invoke \
   --id <DISPUTE_CONTRACT_ID> \
   --source-account "$SOURCE_ACCOUNT" \
@@ -200,7 +202,8 @@ stellar contract invoke \
   --dispute_id 1 \
   --voter <VOTER_ADDRESS> \
   --choice "Freelancer" \
-  --reason "evidence supports delivery"
+  --reason "evidence supports delivery" \
+  --nonce 1
 
 # resolve_dispute(dispute_id)
 stellar contract invoke \

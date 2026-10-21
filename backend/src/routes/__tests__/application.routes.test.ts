@@ -296,7 +296,7 @@ describe("POST /api/jobs/:jobId/apply — wallet verification (#801)", () => {
 
 // ─── DELETE /api/applications/:id ─────────────────────────────────────────────
 describe("DELETE /api/applications/:id", () => {
-  const APP_ID = "00000000-0000-4000-8000-000000000200";
+  const APP_ID = "c000000000000000000000200";
   const FREELANCER_ID = "00000000-0000-4000-8000-000000000300";
 
   it("returns 401 with no auth token", async () => {

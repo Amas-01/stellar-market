@@ -3,7 +3,7 @@
 use super::*;
 use soroban_sdk::{
     contract, contractimpl,
-    testutils::{Address as _, BytesN as _, Events, Ledger},
+    testutils::{storage::Persistent, Address as _, BytesN as _, Events, Ledger},
     BytesN, Env, String,
 };
 
@@ -59,6 +59,7 @@ impl MockReputationContract {
             total_score: 500,
             total_weight: 10,
             review_count: 5,
+            last_updated_ts: 0,
         })
     }
 
@@ -1365,6 +1366,10 @@ fn test_force_resolve_timeout_tie_break_success() {
 
     client.initialize(&admin, &reputation_contract_id, &300, &escrow_contract_id);
 
+    for _ in 0..5 {
+        client.add_arbitrator(&admin, &Address::generate(&env));
+    }
+
     let user_client = Address::generate(&env);
     let freelancer = Address::generate(&env);
 
@@ -1382,7 +1387,180 @@ fn test_force_resolve_timeout_tie_break_success() {
     env.ledger().with_mut(|l| l.timestamp = 605_801);
 
     let status = client.force_resolve_timeout(&dispute_id);
-    assert_eq!(status, DisputeStatus::ResolvedForClient);
+    assert_eq!(status, DisputeStatus::RefundedBoth);
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #27)")]
+fn test_force_resolve_timeout_rejects_inactive_panel() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().with_mut(|l| l.timestamp = 1000);
+    let dispute_contract_id = env.register_contract(None, DisputeContract);
+    let client = DisputeContractClient::new(&env, &dispute_contract_id);
+    let escrow_contract_id = env.register_contract(None, DummyEscrow);
+    let reputation_contract_id = env.register_contract(None, MockReputationContract);
+    let admin = Address::generate(&env);
+    client.initialize(&admin, &reputation_contract_id, &300, &escrow_contract_id);
+    for _ in 0..5 {
+        client.add_arbitrator(&admin, &Address::generate(&env));
+    }
+    let user_client = Address::generate(&env);
+    let freelancer = Address::generate(&env);
+    let dispute_id = client.raise_dispute(
+        &1u64, &user_client, &freelancer, &user_client,
+        &String::from_str(&env, "Issue"), &5u32, &None,
+    );
+    let assigned = client.get_assigned_arbitrators(&dispute_id);
+    client.remove_arbitrator(&admin, &assigned.get(0).unwrap());
+    client.remove_arbitrator(&admin, &assigned.get(1).unwrap());
+    client.remove_arbitrator(&admin, &assigned.get(2).unwrap());
+    env.ledger().with_mut(|l| l.timestamp = 605_801);
+    client.force_resolve_timeout(&dispute_id);
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #24)")]
+fn test_excluded_voter_must_be_assigned_arbitrator() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let dispute_contract_id = env.register_contract(None, DisputeContract);
+    let client = DisputeContractClient::new(&env, &dispute_contract_id);
+    let escrow_contract_id = env.register_contract(None, DummyEscrow);
+    let reputation_contract_id = env.register_contract(None, MockReputationContract);
+    let admin = Address::generate(&env);
+    client.initialize(&admin, &reputation_contract_id, &300, &escrow_contract_id);
+    for _ in 0..5 {
+        client.add_arbitrator(&admin, &Address::generate(&env));
+    }
+    let user_client = Address::generate(&env);
+    let freelancer = Address::generate(&env);
+    let dispute_id = client.raise_dispute(
+        &1u64, &user_client, &freelancer, &user_client,
+        &String::from_str(&env, "Issue"), &5u32, &None,
+    );
+    client.add_excluded_voter(&dispute_id, &user_client, &Address::generate(&env));
+}
+
+#[test]
+fn test_exclusion_requires_both_parties_and_replaces_arbitrator() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let dispute_contract_id = env.register_contract(None, DisputeContract);
+    let client = DisputeContractClient::new(&env, &dispute_contract_id);
+    let escrow_contract_id = env.register_contract(None, DummyEscrow);
+    let reputation_contract_id = env.register_contract(None, MockReputationContract);
+    let admin = Address::generate(&env);
+    client.initialize(&admin, &reputation_contract_id, &300, &escrow_contract_id);
+    for _ in 0..6 {
+        client.add_arbitrator(&admin, &Address::generate(&env));
+    }
+    let user_client = Address::generate(&env);
+    let freelancer = Address::generate(&env);
+    let dispute_id = client.raise_dispute(
+        &1u64, &user_client, &freelancer, &user_client,
+        &String::from_str(&env, "Issue"), &5u32, &None,
+    );
+    let assigned = client.get_assigned_arbitrators(&dispute_id);
+    let excluded = assigned.get(0).unwrap();
+    client.add_excluded_voter(&dispute_id, &user_client, &excluded);
+    assert!(!client.is_excluded_voter(&dispute_id, &excluded));
+    client.add_excluded_voter(&dispute_id, &freelancer, &excluded);
+    let updated = client.get_dispute(&dispute_id);
+    assert!(updated.excluded_voters.contains(&excluded));
+    assert_eq!(updated.assigned_arbitrators.len(), 5);
+    assert!(!updated.assigned_arbitrators.contains(&excluded));
+}
+
+// ── #1166: ExclusionProposal TTL ────────────────────────────────────────────
+
+#[test]
+fn test_exclusion_proposal_ttl_extended_on_write() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let dispute_contract_id = env.register_contract(None, DisputeContract);
+    let client = DisputeContractClient::new(&env, &dispute_contract_id);
+    let escrow_contract_id = env.register_contract(None, DummyEscrow);
+    let reputation_contract_id = env.register_contract(None, MockReputationContract);
+    let admin = Address::generate(&env);
+    client.initialize(&admin, &reputation_contract_id, &300, &escrow_contract_id);
+    for _ in 0..6 {
+        client.add_arbitrator(&admin, &Address::generate(&env));
+    }
+    let user_client = Address::generate(&env);
+    let freelancer = Address::generate(&env);
+    let dispute_id = client.raise_dispute(
+        &1u64, &user_client, &freelancer, &user_client,
+        &String::from_str(&env, "Issue"), &5u32, &None,
+    );
+    let assigned = client.get_assigned_arbitrators(&dispute_id);
+    let voter = assigned.get(0).unwrap();
+
+    client.add_excluded_voter(&dispute_id, &user_client, &voter);
+
+    // Matches every other bump_*_ttl helper's contract: extend_ttl(key,
+    // MIN_TTL_THRESHOLD, MIN_TTL_EXTEND_TO) leaves the key's remaining TTL
+    // at MIN_TTL_EXTEND_TO ledgers. Before #1166 this key was never
+    // extended at all, so its TTL would just be whatever the ledger's
+    // baseline persistent-entry TTL happened to be on write — not this.
+    env.as_contract(&dispute_contract_id, || {
+        let key = DataKey::ExclusionProposal(dispute_id, voter.clone());
+        let ttl = env.storage().persistent().get_ttl(&key);
+        assert_eq!(
+            ttl, MIN_TTL_EXTEND_TO,
+            "ExclusionProposal's TTL was not extended to MIN_TTL_EXTEND_TO on write"
+        );
+    });
+
+    // Advance well past the threshold at which an un-extended entry (using
+    // only the ledger's baseline TTL) would already have expired, but still
+    // short of MIN_TTL_EXTEND_TO — the proposal must still be readable and
+    // confirmable by the second party.
+    env.ledger()
+        .with_mut(|l| l.sequence_number += MIN_TTL_THRESHOLD + 500);
+
+    env.as_contract(&dispute_contract_id, || {
+        let key = DataKey::ExclusionProposal(dispute_id, voter.clone());
+        assert!(
+            env.storage().persistent().has(&key),
+            "exclusion proposal expired from storage before confirmation"
+        );
+    });
+
+    client.add_excluded_voter(&dispute_id, &freelancer, &voter);
+    let updated = client.get_dispute(&dispute_id);
+    assert!(updated.excluded_voters.contains(&voter));
+}
+
+#[test]
+fn test_timeout_uses_protocol_tie_break_after_exclusion_attempts() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().with_mut(|l| l.timestamp = 1000);
+    let dispute_contract_id = env.register_contract(None, DisputeContract);
+    let client = DisputeContractClient::new(&env, &dispute_contract_id);
+    let escrow_contract_id = env.register_contract(None, DummyEscrow);
+    let reputation_contract_id = env.register_contract(None, MockReputationContract);
+    let admin = Address::generate(&env);
+    client.initialize(&admin, &reputation_contract_id, &300, &escrow_contract_id);
+    for _ in 0..10 {
+        client.add_arbitrator(&admin, &Address::generate(&env));
+    }
+    let user_client = Address::generate(&env);
+    let freelancer = Address::generate(&env);
+    let dispute_id = client.raise_dispute(
+        &1u64, &user_client, &freelancer, &user_client,
+        &String::from_str(&env, "Issue"), &10u32,
+        &Some(TieBreakMethod::FavorClient),
+    );
+    let assigned = client.get_assigned_arbitrators(&dispute_id);
+    for i in 0..assigned.len() {
+        let voter = assigned.get(i).unwrap();
+        client.add_excluded_voter(&dispute_id, &user_client, &voter);
+        client.add_excluded_voter(&dispute_id, &freelancer, &voter);
+    }
+    env.ledger().with_mut(|l| l.timestamp = 605_801);
+    assert_eq!(client.force_resolve_timeout(&dispute_id), DisputeStatus::RefundedBoth);
 }
 
 // ── Party-pair cooldown tests (#530) ─────────────────────────────────────────
@@ -3010,6 +3188,61 @@ fn test_resolve_dispute_escrow_fail_enters_resolution_failed() {
     assert_eq!(dispute.status, DisputeStatus::ResolutionFailed);
 }
 
+#[test]
+fn test_escrow_fail_event_includes_resolution_context() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let (client, job_client, freelancer, dispute_id) = setup_dispute_with_failing_escrow(&env);
+    let assigned = client.get_assigned_arbitrators(&dispute_id);
+
+    client.cast_vote(
+        &dispute_id,
+        &assigned.get(0).unwrap(),
+        &VoteChoice::Client,
+        &String::from_str(&env, "r"),
+        &0u64,
+    );
+    client.cast_vote(
+        &dispute_id,
+        &assigned.get(1).unwrap(),
+        &VoteChoice::Client,
+        &String::from_str(&env, "r"),
+        &1u64,
+    );
+    client.cast_vote(
+        &dispute_id,
+        &assigned.get(2).unwrap(),
+        &VoteChoice::Client,
+        &String::from_str(&env, "r"),
+        &2u64,
+    );
+
+    let events = env.events().all();
+    let fail_event = events.iter().find(|(_, topics, _)| {
+        if topics.len() >= 2 {
+            let t1: Symbol = topics.get(1).unwrap().into_val(&env);
+            return t1 == Symbol::new(&env, "escrow_fail");
+        }
+        false
+    });
+
+    assert!(fail_event.is_some(), "escrow_fail event should be emitted");
+
+    let (_, _, data) = fail_event.unwrap();
+    let actual: (u64, DisputeStatus, u64, Address, Address, DisputeResolution) =
+        soroban_sdk::TryFromVal::try_from_val(&env, &data).unwrap();
+    let expected = (
+        dispute_id,
+        DisputeStatus::ResolutionFailed,
+        1u64,
+        job_client,
+        freelancer,
+        DisputeResolution::ClientWins,
+    );
+    assert_eq!(actual, expected);
+}
+
 /// After escrow is fixed, retry_escrow_callback transitions the dispute to the
 /// correct terminal status (ResolvedForClient here).
 #[test]
@@ -3263,7 +3496,7 @@ fn test_appeal_tie_break_respects_method() {
     client.cast_appeal_vote(&appeal_id, &arb4, &VoteChoice::Freelancer, &String::from_str(&env, "F"));
 
     let appeal_status = client.resolve_appeal(&appeal_id);
-    assert_eq!(appeal_status, AppealStatus::ResolvedForClient);
+    assert_eq!(appeal_status, AppealStatus::RefundedBoth);
 }
 
 #[test]
@@ -4019,6 +4252,47 @@ fn test_get_appeal_success() {
     assert_eq!(ap.refund_split_sum, 0);
 }
 
+#[test]
+fn test_get_appeal_votes() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let dispute_contract_id = env.register_contract(None, DisputeContract);
+    let client = DisputeContractClient::new(&env, &dispute_contract_id);
+    let escrow_id = env.register_contract(None, DummyEscrow);
+    let rep_id = env.register_contract(None, MockReputationContract);
+    let admin = Address::generate(&env);
+    client.initialize(&admin, &rep_id, &300, &escrow_id);
+
+    for _ in 0..5 {
+        client.add_arbitrator(&admin, &Address::generate(&env));
+    }
+
+    let user_client = Address::generate(&env);
+    let freelancer = Address::generate(&env);
+    let dispute_id = client.raise_dispute(
+        &1u64, &user_client, &freelancer, &user_client,
+        &String::from_str(&env, "Issue"), &3u32, &None,
+    );
+    resolve_dispute_for_client(&env, &client, dispute_id);
+    let appeal_id = client.appeal(&dispute_id, &user_client);
+
+    assert_eq!(client.get_appeal_votes(&appeal_id).len(), 0);
+
+    let voter = Address::generate(&env);
+    let reason = String::from_str(&env, "Evidence supports the client");
+    let timestamp = env.ledger().timestamp();
+    client.cast_appeal_vote(&appeal_id, &voter, &VoteChoice::Client, &reason);
+
+    let votes = client.get_appeal_votes(&appeal_id);
+    assert_eq!(votes.len(), 1);
+    let vote = votes.get(0).unwrap();
+    assert_eq!(vote.voter, voter);
+    assert_eq!(vote.choice, VoteChoice::Client);
+    assert_eq!(vote.reason, reason);
+    assert_eq!(vote.timestamp, timestamp);
+}
+
 // ─── get_dispute_by_job / get_disputes_for_job tests ─────────────────────
 
 /// Both lookup functions return empty/None for a job that has never had a dispute.
@@ -4122,4 +4396,100 @@ fn test_get_dispute_by_job_and_for_job_with_multiple_disputes() {
     let second = history.get(1).unwrap();
     assert_eq!(second.id, d2);
     assert_eq!(second.reason, String::from_str(&env, "Second dispute"));
+}
+
+/// Regression test for the dispute storage TTL sizing (issue #1163): a dispute
+/// that sits idle for a long stretch — plausible early in the 7-day voting
+/// window — must not have its storage archived by the ledger before it is
+/// resolved. The full worst-case lifecycle is ~16 days (7-day voting period,
+/// 48-hour appeal window, then a 7-day appeal voting period), so the previous
+/// ~10,000-ledger TTL (~14 hours) was far too short.
+#[test]
+fn test_dispute_storage_survives_long_idle_period_to_resolution() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().with_mut(|l| {
+        l.timestamp = 1000;
+        l.sequence_number = 1;
+    });
+
+    let dispute_contract_id = env.register_contract(None, DisputeContract);
+    let client = DisputeContractClient::new(&env, &dispute_contract_id);
+
+    let escrow_contract_id = env.register_contract(None, DummyEscrow);
+    let reputation_contract_id = env.register_contract(None, MockReputationContract);
+
+    // The dispute's storage must survive a long idle period. To also exercise
+    // end-to-end resolution *after* that idle period, keep the mock helper
+    // contracts' instance storage live so the ledger advance below does not
+    // archive them (they hold no per-dispute state; they are test plumbing).
+    env.as_contract(&reputation_contract_id, || {
+        env.storage().instance().extend_ttl(50_000_000, 50_000_000);
+    });
+    env.as_contract(&escrow_contract_id, || {
+        env.storage().instance().extend_ttl(50_000_000, 50_000_000);
+    });
+
+    let admin = Address::generate(&env);
+
+    let user_client = Address::generate(&env);
+    let freelancer = Address::generate(&env);
+
+    client.initialize(&admin, &reputation_contract_id, &300, &escrow_contract_id);
+
+    for _ in 0..5 {
+        let arb = Address::generate(&env);
+        client.add_arbitrator(&admin, &arb);
+    }
+
+    let dispute_id = client.raise_dispute(
+        &1u64,
+        &user_client,
+        &freelancer,
+        &user_client,
+        &String::from_str(&env, "Work not delivered"),
+        &3u32,
+        &None,
+    );
+
+    // Simulate a long-idle dispute: the full 7-day voting period elapses with
+    // no interaction (~120,960 ledgers at 5s/ledger). This is far beyond the
+    // old 10,000-ledger TTL but well inside the resized 21/30-day window, so
+    // the dispute's storage must still be live.
+    env.ledger().with_mut(|l| {
+        l.timestamp = 1000 + VOTING_PERIOD_SECS;
+        l.sequence_number = 1 + (VOTING_PERIOD_SECS / 5) as u32;
+    });
+
+    // The dispute storage must have survived the idle period (not archived).
+    let dispute = client.get_dispute(&dispute_id);
+    assert_eq!(dispute.status, DisputeStatus::Open);
+
+    // And it must still be fully resolvable end-to-end — the long-idle dispute
+    // is not silently broken; storage survives all the way to resolution.
+    let assigned = client.get_assigned_arbitrators(&dispute_id);
+    client.cast_vote(
+        &dispute_id,
+        &assigned.get(0).unwrap(),
+        &VoteChoice::Freelancer,
+        &String::from_str(&env, "Work was delivered"),
+        &0,
+    );
+    client.cast_vote(
+        &dispute_id,
+        &assigned.get(1).unwrap(),
+        &VoteChoice::Freelancer,
+        &String::from_str(&env, "Agree with freelancer"),
+        &0,
+    );
+    client.cast_vote(
+        &dispute_id,
+        &assigned.get(2).unwrap(),
+        &VoteChoice::Client,
+        &String::from_str(&env, "Incomplete work"),
+        &0,
+    );
+
+    let result = client.resolve_dispute(&dispute_id);
+    assert_eq!(result, DisputeStatus::ResolvedForFreelancer);
 }

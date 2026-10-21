@@ -8,6 +8,13 @@ import { ContractService } from "../services/contract.service";
 const prisma = new PrismaClient();
 const ONE_HOUR_MS = 60 * 60 * 1000;
 
+/** Warn the client once the escrow has fewer than this many days before archival. */
+const WARNING_THRESHOLD_DAYS = 14;
+/** Proactively extend the escrow TTL once fewer than this many days remain. */
+const AUTO_EXTEND_THRESHOLD_DAYS = 7;
+/** Do not repeat the warning for the same job within this window. */
+const DUPLICATE_ALERT_WINDOW_MS = 24 * ONE_HOUR_MS;
+
 async function checkEscrowTtls(): Promise<void> {
   logger.info("[EscrowTtlJob] Checking escrow TTLs...");
   
@@ -43,13 +50,13 @@ async function checkEscrowTtls(): Promise<void> {
         `[EscrowTtlJob] Escrow status: ${daysRemaining} days remaining`
       );
 
-      if (daysRemaining < 14) {
+      if (daysRemaining < WARNING_THRESHOLD_DAYS) {
         const lastAlerts = await prisma.notification.findMany({
           where: {
             userId: job.clientId,
             type: NotificationType.ESCROW_TTL_WARNING,
             createdAt: {
-              gte: new Date(Date.now() - 24 * 60 * 60 * 1000),
+              gte: new Date(Date.now() - DUPLICATE_ALERT_WINDOW_MS),
             },
           },
         });
@@ -76,11 +83,11 @@ async function checkEscrowTtls(): Promise<void> {
         }
       }
 
-      if (daysRemaining < 7) {
+      if (daysRemaining < AUTO_EXTEND_THRESHOLD_DAYS) {
         if (!config.stellar.keeperSecretKey) {
           logger.warn(
             { jobId: job.id, daysRemaining },
-            "[EscrowTtlJob] Escrow within 7 days of expiry but no keeperSecretKey configured to extend it."
+            `[EscrowTtlJob] Escrow within ${AUTO_EXTEND_THRESHOLD_DAYS} days of expiry but no keeperSecretKey configured to extend it.`
           );
           continue;
         }
@@ -134,4 +141,9 @@ export function startEscrowTtlJob(): void {
   logger.info("[EscrowTtlJob] Scheduled — runs every hour");
 }
 
-export { checkEscrowTtls };
+export {
+  checkEscrowTtls,
+  WARNING_THRESHOLD_DAYS,
+  AUTO_EXTEND_THRESHOLD_DAYS,
+  DUPLICATE_ALERT_WINDOW_MS,
+};

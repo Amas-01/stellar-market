@@ -1,5 +1,6 @@
 import { Router, Response } from "express";
 import { PrismaClient } from "@prisma/client";
+import rateLimit from "express-rate-limit";
 import { z } from "zod";
 import crypto from "crypto";
 import fs from "fs";
@@ -20,6 +21,25 @@ import { auditLogger } from "../utils/auditLogger";
 
 const router = Router();
 const prisma = new PrismaClient();
+
+// Rate limiter for uploads (10 uploads per hour per user)
+const uploadRateLimiter = rateLimit({
+  windowMs: 60 * 60 * 1000,
+  max: 10,
+  keyGenerator: (req) => {
+    const userId = (req as AuthRequest).userId;
+    if (userId) return String(userId);
+    return (req.ip ?? req.socket?.remoteAddress ?? "anon").replace(/^::ffff:/i, "");
+  },
+  validate: { ip: false },
+  standardHeaders: true,
+  legacyHeaders: false,
+  handler: (_req, res) => {
+    res
+      .status(429)
+      .json({ error: "Upload limit reached — you may upload up to 10 files per hour" });
+  },
+});
 
 // Validation schemas
 const uploadSchema = {
@@ -67,6 +87,7 @@ router.get("/avatars/:filename", (req, res) => {
 router.post(
   "/",
   authenticate,
+  uploadRateLimiter,
   upload.single("file"),
   validate(uploadSchema),
   async (req: AuthRequest, res: Response) => {
@@ -160,6 +181,31 @@ router.post(
           fs.unlinkSync(req.file.path);
           return res.status(403).json({
             error: "Only job participants can upload files",
+          });
+        }
+      }
+
+      // If disputeId provided, verify dispute exists and user has access
+      if (disputeId) {
+        const dispute = await prisma.dispute.findUnique({
+          where: { id: disputeId },
+          select: {
+            id: true,
+            clientId: true,
+            freelancerId: true,
+          },
+        });
+
+        if (!dispute) {
+          fs.unlinkSync(req.file.path);
+          return res.status(404).json({ error: "Dispute not found" });
+        }
+
+        // Only dispute client or freelancer can upload files
+        if (dispute.clientId !== req.userId && dispute.freelancerId !== req.userId) {
+          fs.unlinkSync(req.file.path);
+          return res.status(403).json({
+            error: "Only dispute participants can upload files",
           });
         }
       }
@@ -258,6 +304,13 @@ router.get(
                 freelancerId: true,
               },
             },
+            dispute: {
+              select: {
+                id: true,
+                clientId: true,
+                freelancerId: true,
+              },
+            },
           },
         });
       } else {
@@ -266,6 +319,13 @@ router.get(
           where: { id: attachmentId },
           include: {
             job: {
+              select: {
+                id: true,
+                clientId: true,
+                freelancerId: true,
+              },
+            },
+            dispute: {
               select: {
                 id: true,
                 clientId: true,
@@ -287,6 +347,14 @@ router.get(
           attachment.job.freelancerId === req.userId;
 
         if (!isParticipant && attachment.uploaderId !== req.userId) {
+          return res.status(403).json({ error: "Access denied" });
+        }
+      } else if (attachment.dispute) {
+        const isDisputeParty =
+          attachment.dispute.clientId === req.userId ||
+          attachment.dispute.freelancerId === req.userId;
+
+        if (!isDisputeParty && attachment.uploaderId !== req.userId) {
           return res.status(403).json({ error: "Access denied" });
         }
       } else if (attachment.uploaderId !== req.userId) {
@@ -327,10 +395,47 @@ router.get(
     try {
       const attachment = await prisma.attachment.findUnique({
         where: { id: req.params.id as string },
+        include: {
+          job: {
+            select: {
+              id: true,
+              clientId: true,
+              freelancerId: true,
+            },
+          },
+          dispute: {
+            select: {
+              id: true,
+              clientId: true,
+              freelancerId: true,
+            },
+          },
+        },
       });
 
       if (!attachment) {
         return res.status(404).json({ error: "Attachment not found" });
+      }
+
+      // Access control: reuse the same logic as the download route
+      if (attachment.job) {
+        const isParticipant =
+          attachment.job.clientId === req.userId ||
+          attachment.job.freelancerId === req.userId;
+
+        if (!isParticipant && attachment.uploaderId !== req.userId) {
+          return res.status(403).json({ error: "Access denied" });
+        }
+      } else if (attachment.dispute) {
+        const isDisputeParty =
+          attachment.dispute.clientId === req.userId ||
+          attachment.dispute.freelancerId === req.userId;
+
+        if (!isDisputeParty && attachment.uploaderId !== req.userId) {
+          return res.status(403).json({ error: "Access denied" });
+        }
+      } else if (attachment.uploaderId !== req.userId) {
+        return res.status(403).json({ error: "Access denied" });
       }
 
       if (!attachment.sha256) {

@@ -18,6 +18,8 @@ import {
   paginationSchema,
 } from "../schemas";
 
+import { buildConversationSummaries } from "../utils/conversations";
+
 const router = Router();
 /**
  * @swagger
@@ -119,22 +121,6 @@ router.post(
   }),
 );
 
-// Get unread message count for the current user (used by Navbar badge)
-router.get("/unread-count", authenticate, async (req: AuthRequest, res: Response) => {
-  try {
-    const count = await prisma.message.count({
-      where: {
-        receiverId: req.userId!,
-        read: false,
-      },
-    });
-
-    res.json({ count });
-  } catch (error) {
-    logger.error({ err: error }, "Unread count error");
-    res.status(500).json({ error: "Internal server error." });
-  }
-});
 
 // Get list of conversations for the current user (distinct partners) — used by Socket-based chat UI
 router.get(
@@ -159,34 +145,14 @@ router.get(
         orderBy: { createdAt: "desc" },
       });
 
-      const conversationMap = new Map<
-        string,
-        {
-          partner: { id: string; username: string; avatarUrl: string | null };
-          lastMessage: (typeof messages)[number];
-          unreadCount: number;
-        }
-      >();
-
-      for (const msg of messages) {
-        const partner = msg.senderId === userId ? msg.receiver : msg.sender;
-        const partnerId = partner.id;
-
-        if (!conversationMap.has(partnerId)) {
-          conversationMap.set(partnerId, {
-            partner,
-            lastMessage: msg,
-            unreadCount: 0,
-          });
-        }
-
-        if (msg.senderId === partnerId && !msg.read) {
-          const convo = conversationMap.get(partnerId)!;
-          convo.unreadCount += 1;
-        }
-      }
-
-      const allConversations = Array.from(conversationMap.values());
+      // Grouped by partner only: one entry per user, merged across jobs.
+      const allConversations = buildConversationSummaries(messages, userId, {
+        groupBy: "partner",
+      }).map(({ otherUser, lastMessage, unreadCount }) => ({
+        partner: otherUser,
+        lastMessage,
+        unreadCount,
+      }));
       const total = allConversations.length;
       const conversations = allConversations.slice(skip, skip + limit);
       const hasNext = skip + limit < total;
@@ -213,7 +179,13 @@ router.get("/",
   validate({ query: getMessagesQuerySchema.merge(paginationSchema) }),
   asyncHandler(async (req: AuthRequest, res: Response) => {
     const jobId = req.query.jobId as string | undefined;
+    const senderId = req.query.senderId as string | undefined;
+    const receiverId = req.query.receiverId as string | undefined;
     const participantId = req.query.participantId as string | undefined;
+    const messageFilters = [
+      ...(senderId ? [{ senderId }] : []),
+      ...(receiverId ? [{ receiverId }] : []),
+    ];
     const page = Number(req.query.page) || 1;
     const limit = Number(req.query.limit) || 10;
     const skip = (page - 1) * limit;
@@ -228,6 +200,7 @@ router.get("/",
               { senderId: participantId as string, receiverId: req.userId! },
             ],
           },
+          ...messageFilters,
         ],
       };
 
@@ -259,10 +232,15 @@ router.get("/",
     }
 
     // Fetch all messages involving the user to construct conversation list
+    const userMessagesWhere = {
+      OR: [{ senderId: req.userId! }, { receiverId: req.userId! }],
+    };
+    const where =
+      messageFilters.length > 0
+        ? { AND: [userMessagesWhere, ...messageFilters] }
+        : userMessagesWhere;
     const allMessages = await prisma.message.findMany({
-      where: {
-        OR: [{ senderId: req.userId! }, { receiverId: req.userId! }],
-      },
+      where,
       include: {
         sender: { select: { id: true, username: true, avatarUrl: true } },
         receiver: { select: { id: true, username: true, avatarUrl: true } },
@@ -271,28 +249,11 @@ router.get("/",
       orderBy: { createdAt: "desc" },
     });
 
-    const conversationsMap = new Map();
-
-    allMessages.forEach((msg) => {
-      const otherUser = msg.senderId === req.userId ? msg.receiver : msg.sender;
-      const key = `${otherUser.id}-${msg.jobId || "no-job"}`;
-
-      if (!conversationsMap.has(key)) {
-        conversationsMap.set(key, {
-          id: key,
-          otherUser,
-          job: msg.job,
-          lastMessage: msg,
-          unreadCount: 0,
-        });
-      }
-
-      if (msg.receiverId === req.userId && !msg.read) {
-        conversationsMap.get(key).unreadCount++;
-      }
+    // Grouped by partner AND job: the same partner appears once per job
+    // (plus once for job-less messages), so the UI can show per-job threads.
+    const allConversations = buildConversationSummaries(allMessages, req.userId!, {
+      groupBy: "partner-and-job",
     });
-
-    const allConversations = Array.from(conversationsMap.values());
     const total = allConversations.length;
     const conversations = allConversations.slice(skip, skip + limit);
     const hasNext = skip + limit < total;
@@ -401,11 +362,21 @@ router.put(
     const id = req.params.id as string;
     const { isRead } = req.body;
 
+    const message = await prisma.message.findUnique({
+      where: { id },
+    });
+
+    if (!message) {
+      return res.status(404).json({ error: "Message not found." });
+    }
+    if (message.receiverId !== req.userId) {
+      return res
+        .status(403)
+        .json({ error: "Not authorized to mark this message as read." });
+    }
+
     await prisma.message.update({
-      where: {
-        id,
-        receiverId: req.userId!,
-      },
+      where: { id },
       data: { read: isRead },
     });
     res.status(204).send();

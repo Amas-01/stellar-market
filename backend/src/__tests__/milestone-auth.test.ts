@@ -14,6 +14,7 @@ type MockPrismaClient = {
   };
   milestone: {
     findMany: jest.Mock;
+    findUnique: jest.Mock;
   };
   user: {
     findUnique: jest.Mock;
@@ -27,6 +28,7 @@ jest.mock("@prisma/client", () => {
     },
     milestone: {
       findMany: jest.fn(),
+      findUnique: jest.fn(),
     },
     user: {
       findUnique: jest.fn(),
@@ -187,5 +189,44 @@ describe("GET /api/milestones/jobs/:jobId/milestones — Authorization", () => {
 
     expect(res.status).toBe(404);
     expect(res.body.error).toBe("Job not found.");
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// PATCH /api/milestones/:id/status — 403 vs 400 semantics
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe("PATCH /api/milestones/:id/status — status codes", () => {
+  const MILESTONE_ID = "m-1";
+
+  beforeEach(() => {
+    prismaMock.milestone.findUnique.mockResolvedValue({
+      id: MILESTONE_ID,
+      status: "PENDING",
+      job: mockJob,
+    });
+  });
+
+  it("returns 400 for an authorized caller requesting an invalid transition", async () => {
+    mockAuthAs(FREELANCER_ID);
+
+    const res = await request(buildApp())
+      .patch(`/api/milestones/${MILESTONE_ID}/status`)
+      .set("Authorization", "Bearer mock-token")
+      .send({ status: "APPROVED" });
+
+    expect(res.status).toBe(400);
+    expect(res.body.error).toMatch(/Invalid status transition/);
+  });
+
+  it("still returns 403 for a caller who is not a job participant", async () => {
+    mockAuthAs(STRANGER_ID);
+
+    const res = await request(buildApp())
+      .patch(`/api/milestones/${MILESTONE_ID}/status`)
+      .set("Authorization", "Bearer mock-token")
+      .send({ status: "IN_PROGRESS" });
+
+    expect(res.status).toBe(403);
   });
 });

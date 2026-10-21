@@ -46,6 +46,9 @@ const TIMELOCK: u64 = 24 * 3600; // 1 day
 const GRACE: u64 = 3 * 24 * 3600; // 3 days
 const QUORUM: u128 = 100;
 const PASS_BPS: u32 = 5000; // simple majority (> 50% of decisive votes)
+/// Matches the escrow's `MULTISIG_TIME_LOCK_SECS`: sensitive admin actions
+/// (including governance reconfiguration) cannot execute for 48 hours.
+const MULTISIG_TIME_LOCK_SECS: u64 = 48 * 60 * 60;
 
 struct Ctx<'a> {
     env: Env,
@@ -73,9 +76,19 @@ fn setup() -> Ctx<'static> {
     // Start fee at 100 bps so a governance change to 250 is observable.
     escrow.initialize(&signers, &1, &treasury, &100, &604_800);
 
-    escrow.configure_governance(
-        &signer,
-        &rep_id,
+    let ctx = Ctx {
+        env,
+        escrow,
+        rep_id,
+        signer,
+    };
+
+    // Governance reconfiguration is a sensitive admin action: it is proposed
+    // through the multisig and only executes once the 48-hour timelock has
+    // elapsed.
+    let proposal_id = ctx.escrow.configure_governance(
+        &ctx.signer,
+        &ctx.rep_id,
         &VOTING_PERIOD,
         &TIMELOCK,
         &GRACE,
@@ -83,13 +96,10 @@ fn setup() -> Ctx<'static> {
         &PASS_BPS,
         &0, // min_proposer_weight
     );
+    advance(&ctx, MULTISIG_TIME_LOCK_SECS + 1);
+    ctx.escrow.execute_proposal(&ctx.signer, &proposal_id);
 
-    Ctx {
-        env,
-        escrow,
-        rep_id,
-        signer,
-    }
+    ctx
 }
 
 /// Register a voter in the mock reputation contract with `score` last changed at
@@ -490,6 +500,91 @@ fn delegated_weight_is_snapshot_safe() {
     );
 }
 
+#[test]
+fn undelegate_removes_delegation_and_restores_direct_voting() {
+    let ctx = setup();
+    let delegate = voter_with(&ctx, 40, 500_000);
+    let delegator = voter_with(&ctx, 90, 500_000);
+
+    // Initial state: no delegation set
+    assert_eq!(ctx.escrow.get_delegate(&delegator), None);
+
+    // 1. Delegate away
+    ctx.escrow.delegate(&delegator, &delegate);
+    assert_eq!(ctx.escrow.get_delegate(&delegator), Some(delegate.clone()));
+
+    let id = ctx
+        .escrow
+        .propose_governance(&delegate, &AdminAction::SetFeeBps(250));
+
+    // Delegator cannot vote directly while delegated
+    assert_eq!(
+        ctx.escrow
+            .try_cast_vote(&delegator, &id, &VoteSupport::Against),
+        Err(Ok(GovError::DelegatedAway))
+    );
+
+    // 2. Undelegate
+    ctx.escrow.undelegate(&delegator);
+
+    // Verify delegation is completely cleared
+    assert_eq!(ctx.escrow.get_delegate(&delegator), None);
+
+    // Former delegate can no longer cast a delegated vote on delegator's behalf
+    ctx.escrow.cast_vote(&delegate, &id, &VoteSupport::For);
+    assert_eq!(
+        ctx.escrow
+            .try_cast_delegated_vote(&delegate, &id, &delegator),
+        Err(Ok(GovError::NotDelegate))
+    );
+
+    // Delegator can now vote directly with their full weight
+    ctx.escrow.cast_vote(&delegator, &id, &VoteSupport::Against);
+    let r = ctx.escrow.get_vote_receipt(&id, &delegator).unwrap();
+    assert_eq!(r.weight, 90);
+    assert!(!r.via_delegate);
+    assert_eq!(r.support, VoteSupport::Against);
+
+    let p = ctx.escrow.get_governance_proposal(&id).unwrap();
+    assert_eq!(p.for_weight, 40);
+    assert_eq!(p.against_weight, 90);
+}
+
+#[test]
+fn self_delegation_clears_existing_delegation() {
+    let ctx = setup();
+    let delegate = voter_with(&ctx, 40, 500_000);
+    let delegator = voter_with(&ctx, 90, 500_000);
+
+    // Set delegation to delegate
+    ctx.escrow.delegate(&delegator, &delegate);
+    assert_eq!(ctx.escrow.get_delegate(&delegator), Some(delegate.clone()));
+
+    // Self-delegation (delegating to oneself) clears the delegation
+    ctx.escrow.delegate(&delegator, &delegator);
+    assert_eq!(ctx.escrow.get_delegate(&delegator), None);
+
+    // Verify direct voting is restored
+    let id = ctx
+        .escrow
+        .propose_governance(&delegate, &AdminAction::SetFeeBps(250));
+    ctx.escrow.cast_vote(&delegator, &id, &VoteSupport::For);
+    let r = ctx.escrow.get_vote_receipt(&id, &delegator).unwrap();
+    assert_eq!(r.weight, 90);
+    assert!(!r.via_delegate);
+}
+
+#[test]
+fn undelegate_when_not_delegated_succeeds_gracefully() {
+    let ctx = setup();
+    let delegator = voter_with(&ctx, 90, 500_000);
+
+    assert_eq!(ctx.escrow.get_delegate(&delegator), None);
+    // Undelegating when no delegation is active does not error
+    ctx.escrow.undelegate(&delegator);
+    assert_eq!(ctx.escrow.get_delegate(&delegator), None);
+}
+
 // ============================================================
 // Governance / multisig separation of powers
 // ============================================================
@@ -658,6 +753,20 @@ fn execute_after_grace_is_refused_then_expirable() {
 // ============================================================
 
 #[test]
+fn get_governance_config_returns_configured_values() {
+    let ctx = setup();
+
+    let config = ctx.escrow.get_governance_config().unwrap();
+    assert_eq!(config.reputation, ctx.rep_id);
+    assert_eq!(config.voting_period_secs, VOTING_PERIOD);
+    assert_eq!(config.timelock_secs, TIMELOCK);
+    assert_eq!(config.grace_secs, GRACE);
+    assert_eq!(config.quorum_votes, QUORUM);
+    assert_eq!(config.pass_threshold_bps, PASS_BPS);
+    assert_eq!(config.min_proposer_weight, 0);
+}
+
+#[test]
 fn propose_requires_governance_configured() {
     let env = Env::default();
     env.mock_all_auths();
@@ -728,6 +837,99 @@ fn configure_governance_rejects_invalid_params() {
 }
 
 #[test]
+fn configure_governance_timelock_blocks_immediate_execution() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().with_mut(|l| l.timestamp = 1_000_000);
+
+    let escrow_id = env.register_contract(None, EscrowContract);
+    let escrow = EscrowContractClient::new(&env, &escrow_id);
+    let rep_id = env.register_contract(None, MockReputation);
+
+    let signer = Address::generate(&env);
+    let treasury = Address::generate(&env);
+    let signers = soroban_sdk::vec![&env, signer.clone()];
+    escrow.initialize(&signers, &1, &treasury, &100, &604_800);
+
+    let proposal_id = escrow.configure_governance(
+        &signer,
+        &rep_id,
+        &VOTING_PERIOD,
+        &TIMELOCK,
+        &GRACE,
+        &QUORUM,
+        &PASS_BPS,
+        &0,
+    );
+
+    // Threshold is 1, but the 48-hour timelock still gates execution.
+    assert!(escrow.get_governance_config().is_none());
+    assert_eq!(
+        escrow.try_execute_proposal(&signer, &proposal_id),
+        Err(Ok(EscrowError::ProposalTimeLockActive))
+    );
+
+    env.ledger()
+        .with_mut(|l| l.timestamp += MULTISIG_TIME_LOCK_SECS + 1);
+    escrow.execute_proposal(&signer, &proposal_id);
+    assert!(escrow.get_governance_config().is_some());
+}
+
+#[test]
+fn configure_governance_requires_multisig_threshold_approval() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().with_mut(|l| l.timestamp = 1_000_000);
+
+    let escrow_id = env.register_contract(None, EscrowContract);
+    let escrow = EscrowContractClient::new(&env, &escrow_id);
+    let rep_id = env.register_contract(None, MockReputation);
+
+    // Two signers, threshold 2: one signer alone must not be able to
+    // reconfigure governance.
+    let signer1 = Address::generate(&env);
+    let signer2 = Address::generate(&env);
+    let treasury = Address::generate(&env);
+    let signers = soroban_sdk::vec![&env, signer1.clone(), signer2.clone()];
+    escrow.initialize(&signers, &2, &treasury, &100, &604_800);
+
+    let new_rep = env.register_contract(None, MockReputation);
+
+    // A single signer proposes the reconfiguration, but with threshold 2 it
+    // cannot execute: the second approval is missing and the 48-hour timelock
+    // is still running.
+    let proposal_id = escrow.configure_governance(
+        &signer1,
+        &new_rep,
+        &VOTING_PERIOD,
+        &TIMELOCK,
+        &GRACE,
+        &QUORUM,
+        &PASS_BPS,
+        &0,
+    );
+    assert!(escrow.get_governance_config().is_none());
+    assert_eq!(
+        escrow.try_execute_proposal(&signer1, &proposal_id),
+        Err(Ok(EscrowError::Unauthorized))
+    );
+
+    // Even after the timelock elapses, one signer alone is not enough.
+    env.ledger()
+        .with_mut(|l| l.timestamp += MULTISIG_TIME_LOCK_SECS + 1);
+    assert_eq!(
+        escrow.try_execute_proposal(&signer1, &proposal_id),
+        Err(Ok(EscrowError::Unauthorized))
+    );
+
+    // The second signer approves; threshold met and timelock elapsed, so the
+    // reconfiguration executes.
+    escrow.approve_admin_action(&signer2, &proposal_id);
+    let config = escrow.get_governance_config().unwrap();
+    assert_eq!(config.reputation, new_rep);
+}
+
+#[test]
 fn propose_rejects_fee_above_max() {
     let ctx = setup();
     let a = voter_with(&ctx, 200, 500_000);
@@ -743,7 +945,7 @@ fn propose_rejects_fee_above_max() {
 fn min_proposer_weight_is_enforced() {
     let ctx = setup();
     // Re-tune governance to require a proposer weight of 100.
-    ctx.escrow.configure_governance(
+    let proposal_id = ctx.escrow.configure_governance(
         &ctx.signer,
         &ctx.rep_id,
         &VOTING_PERIOD,
@@ -753,6 +955,8 @@ fn min_proposer_weight_is_enforced() {
         &PASS_BPS,
         &100,
     );
+    advance(&ctx, MULTISIG_TIME_LOCK_SECS + 1);
+    ctx.escrow.execute_proposal(&ctx.signer, &proposal_id);
     let weak = voter_with(&ctx, 50, 500_000);
     assert_eq!(
         ctx.escrow

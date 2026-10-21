@@ -22,6 +22,11 @@ pub enum EscrowError {
     GracePeriodNotMet = 11,
     InvalidMilestoneIndex = 12,
     TokenNotAllowed = 13,
+    /// Also returned when an `AddSigner` proposal names an address that is
+    /// already a multi-sig signer (issue #1155) — the multi-sig configuration
+    /// the proposal asks for is already in place. `EscrowError` is at the SDK's
+    /// 50-variant cap, so this reuses the nearest existing variant rather than
+    /// adding one, in the same way `create_job` reuses `Unauthorized`.
     AlreadyInitialized = 14,
     ContractPaused = 15,
     NotAdmin = 16,
@@ -61,7 +66,7 @@ pub enum EscrowError {
     /// The milestone list is empty.
     EmptyMilestones = 33,
     /// The number of milestones exceeds the permitted limit.
-    TooManyMilestones = 48,
+    TooManyMilestones = 34,
     /// The fee basis points exceed the maximum permitted limit.
     InvalidFee = 35,
     /// Proposal execution is time-locked and cannot be executed yet.
@@ -123,6 +128,21 @@ pub enum AdminAction {
     /// Emergency withdrawal: recover escrowed funds from a specific job to a recipient address.
     /// Only executable when the contract is paused. Requires multi-sig approval.
     EmergencyWithdraw(u64, Address),
+    /// Reconfigure reputation-weighted governance (issue #899 follow-up).
+    /// Routed through the standard multisig flow like other sensitive admin
+    /// actions: it requires threshold signer approvals and is subject to the
+    /// 48-hour timelock, so no single compromised or rogue signer can
+    /// unilaterally reconfigure governance parameters — including the
+    /// reputation contract address that every vote's weight is sourced from.
+    ConfigureGovernance(
+        Address, // reputation contract providing snapshot voting weight
+        u64,     // voting_period_secs
+        u64,     // timelock_secs
+        u64,     // grace_secs
+        u128,    // quorum_votes
+        u32,     // pass_threshold_bps
+        u64,     // min_proposer_weight
+    ),
 }
 
 /// A pending multi-sig proposal. Executed when `approvals.len() >= threshold`.
@@ -165,11 +185,20 @@ pub struct MultiSigProposal {
 ///                                │
 ///                    resolve_dispute_callback
 ///                                │
-///                    ┌───────────┴───────────┐
-///                    ▼                       ▼
-///              ┌───────────┐           ┌───────────┐
-///              │ Completed │           │ Cancelled │
-///              └───────────┘           └───────────┘
+///                    ┌───────────┼───────────────────────┐
+///                    │           │                       │
+///          FreelancerWins    ClientWins /            Escalate
+///                    │       RefundBoth /                 │
+///                    │       RefundSplit /       (status unchanged —
+///                    │       MaliciousFiling      job stays Disputed,
+///                    │           │                no funds moved)
+///                    ▼           ▼                        │
+///              ┌───────────┐ ┌───────────┐                │
+///              │ Completed │ │ Cancelled │ <──────────────┘
+///              └───────────┘ └───────────┘   a later resolve_dispute_callback
+///                    ▲                       with a final resolution
+///                    │
+///                    └── (or expire_job once the deadline passes ──> Expired)
 /// ```
 ///
 /// ## State Descriptions
@@ -179,6 +208,9 @@ pub struct MultiSigProposal {
 /// - **InProgress**: Work has begun. Milestones can be submitted, approved, or disputed.
 /// - **Completed**: All milestones approved and payments released. Terminal state.
 /// - **Disputed**: A dispute has been raised. Only dispute resolution can change state.
+///   Not a terminal state: an `Escalate` resolution leaves the job here (see
+///   [Escalated disputes](#escalated-disputes)) until a later resolution or
+///   `expire_job` moves it on.
 /// - **Cancelled**: Job was cancelled or refunded. Terminal state.
 /// - **Expired**: Job deadline passed without completion. Terminal state.
 ///
@@ -194,10 +226,45 @@ pub struct MultiSigProposal {
 /// | InProgress  | Disputed    | External dispute contract     | Either party raises dispute         |
 /// | InProgress  | Cancelled   | `cancel_job`                  | No active work, client cancels      |
 /// | InProgress  | Expired     | `expire_job`                  | Deadline passed                     |
-/// | Disputed    | Completed   | `resolve_dispute_callback`    | Resolution favors freelancer        |
-/// | Disputed    | Cancelled   | `resolve_dispute_callback`    | Resolution favors client            |
+/// | Disputed    | Completed   | `resolve_dispute_callback`    | `FreelancerWins`                    |
+/// | Disputed    | Cancelled   | `resolve_dispute_callback`    | `ClientWins`, `RefundBoth`, `RefundSplit`, `MaliciousFiling` |
+/// | Disputed    | Disputed    | `resolve_dispute_callback`    | `Escalate` — no state change, no payout |
+/// | Disputed    | Expired     | `expire_job`                  | Deadline passed while still disputed |
 ///
 /// Terminal states (Completed, Cancelled, Expired) cannot transition to any other state.
+///
+/// ## Escalated disputes
+///
+/// [`DisputeResolution::Escalate`] is the one resolution that does **not** settle a
+/// job. In `resolve_dispute_callback` its arm is deliberately empty: no token is
+/// transferred (`apply_dispute_distribution` is a no-op for `Escalate`,
+/// and `calculate_payout` reports an all-zero [`PayoutBreakdown`]) and the job's
+/// status is left exactly as it was — a disputed job stays `Disputed`, holding the
+/// full escrowed balance. It is a self-loop, not a terminal transition.
+///
+/// The escalation itself is recorded off this contract: `resolve_dispute_callback`
+/// still emits the `("escrow", "dispute")` event carrying `Escalate`, which is the
+/// signal for the dispute contract / off-chain arbitration tier to pick the case up.
+/// This contract holds no escalation queue, deadline, or auto-resolution timer of
+/// its own, so nothing here will move the job on by itself.
+///
+/// **How an escalated job leaves `Disputed`** — one of two paths, both externally
+/// driven:
+///
+/// 1. **Re-resolution (expected path).** The dispute contract calls
+///    `resolve_dispute_callback` again with a final resolution. This is permitted
+///    because `require_state_disputable` accepts `Disputed` as an input state, so
+///    an escalated job can be resolved any number of times until a non-`Escalate`
+///    resolution settles it. The remaining balance is recomputed from the job's
+///    approved milestones at that point, so no funds are lost by escalating first.
+/// 2. **Expiry (backstop).** Once `job.job_deadline` has passed, anyone may call
+///    `expire_job`; `require_state_expirable` rejects only the terminal states, so a
+///    `Disputed` job is expirable. Approved milestones are paid out to the freelancer
+///    and the remainder is refunded to the client, and the job becomes `Expired`.
+///
+/// Responsibility for driving path 1 sits with the dispute contract's arbitration
+/// tier, not with the escrow contract. If it never does so, the job remains in
+/// `Disputed` with funds escrowed until the deadline makes path 2 available.
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum JobStatus {
@@ -217,6 +284,9 @@ pub enum DisputeResolution {
     FreelancerWins,
     RefundBoth,
     RefundSplit(u32),
+    /// Hand the dispute to a higher arbitration tier. Settles nothing: no funds are
+    /// moved and the job keeps its current status (a disputed job stays `Disputed`).
+    /// See the [`JobStatus`] state-machine docs, "Escalated disputes".
     Escalate,
     /// Dispute was filed in bad faith; initiator's full stake is sent to treasury.
     MaliciousFiling,
@@ -429,12 +499,31 @@ const TWAP_SAMPLE_LEDGERS: u32 = 10;
 
 /// Default proposal expiry: 7 days in seconds.
 const DEFAULT_PROPOSAL_EXPIRY_SECS: u64 = 7 * 24 * 3600;
+/// Time after a milestone is submitted before the client's inactivity auto-approval
+/// can be scheduled (7 days).
 const INACTIVITY_THRESHOLD_SECS: u64 = 7 * 24 * 3600;
+/// Grace period between scheduling an inactivity auto-approval and its execution,
+/// during which the client can still act on the milestone (3 days).
 const INACTIVITY_GRACE_SECS: u64 = 3 * 24 * 3600;
+/// Time lock on multi-sig `Pause`, `SetTreasury`, and `ConfigureGovernance` actions
+/// before they can execute (48 hours).
 const MULTISIG_TIME_LOCK_SECS: u64 = 48 * 60 * 60;
+/// Lifetime of a multi-sig proposal: once this many seconds have passed since creation,
+/// it can no longer be executed and may be archived (7 days).
 const PROPOSAL_TTL: u64 = 7 * 24 * 60 * 60;
 
+/// Number of ledgers a consumed nonce is kept in temporary storage, which bounds
+/// the replay-protection window.
 const NONCE_EXPIRY_LEDGERS: u32 = 3;
+
+/// Returns the configured revision-proposal expiry in seconds, or the default
+/// when none was set during `initialize`.
+fn proposal_expiry_secs(env: &Env) -> u64 {
+    env.storage()
+        .instance()
+        .get(&DataKey::ProposalExpiry)
+        .unwrap_or(DEFAULT_PROPOSAL_EXPIRY_SECS)
+}
 
 fn get_job_key(job_id: u64) -> DataKey {
     DataKey::Job(job_id)
@@ -551,6 +640,44 @@ fn is_signer(env: &Env, address: &Address) -> bool {
     }
 }
 
+/// Loads a multi-sig proposal from wherever it currently lives (issue #1153).
+///
+/// Pending proposals sit in instance storage so the governance flow can read and
+/// mutate them cheaply. Terminal ones (executed or expired) have been moved to
+/// persistent storage by `archive_proposal`. Looking in both places keeps error
+/// reporting honest: re-approving an already-executed proposal still reports
+/// `MultiSigAlreadyExecuted` rather than degrading to "not found".
+fn load_proposal(env: &Env, proposal_id: u64) -> Option<MultiSigProposal> {
+    let key = DataKey::MultiSigProposal(proposal_id);
+    env.storage()
+        .instance()
+        .get(&key)
+        .or_else(|| env.storage().persistent().get(&key))
+}
+
+/// Moves a terminal proposal out of instance storage and into persistent storage
+/// under a bounded TTL (issue #1153).
+///
+/// Instance storage is read in full on every invocation of this contract, so a
+/// proposal that can never be acted on again must not stay there. The companion
+/// `MultiSigExecutionNotBefore` entry is dropped outright — it only gates
+/// execution, which is no longer possible.
+fn archive_proposal(env: &Env, proposal_id: u64, proposal: &MultiSigProposal) {
+    let key = DataKey::MultiSigProposal(proposal_id);
+
+    env.storage().instance().remove(&key);
+    env.storage()
+        .instance()
+        .remove(&DataKey::MultiSigExecutionNotBefore(proposal_id));
+
+    env.storage().persistent().set(&key, proposal);
+    env.storage().persistent().extend_ttl(
+        &key,
+        PROPOSAL_ARCHIVE_TTL_THRESHOLD,
+        PROPOSAL_ARCHIVE_TTL_LEDGERS,
+    );
+}
+
 // Production TTL constants based on Stellar's ~5-second ledger close time
 const LEDGERS_PER_DAY: u32 = 17_280; // 86,400 seconds/day ÷ 5 seconds/ledger
 const TTL_THRESHOLD_LEDGERS: u32 = LEDGERS_PER_DAY * 15; // 15 days = 259,200 ledgers
@@ -560,6 +687,16 @@ const INSTANCE_TTL_THRESHOLD: u32 = 50_000_000;
 const INSTANCE_TTL_EXTEND_TO: u32 = 50_000_000;
 
 const ESCROW_TTL_LEDGERS: u32 = 535_000; // ~90 days at 5s/ledger
+
+// Bounded TTL for archived multi-sig proposals (issue #1153). Once a proposal
+// reaches a terminal state (executed or expired) it is moved out of instance
+// storage — which is loaded in full on *every* contract invocation — into
+// persistent storage under the same `DataKey::MultiSigProposal(id)` key. The
+// record stays readable by auditors and off-chain tooling for ~30 days and then
+// expires on its own, so governance history can never grow without bound.
+const PROPOSAL_ARCHIVE_TTL_THRESHOLD: u32 = LEDGERS_PER_DAY * 15; // 15 days
+const PROPOSAL_ARCHIVE_TTL_LEDGERS: u32 = LEDGERS_PER_DAY * 30; // 30 days
+
 type EscrowKey = DataKey;
 
 #[contracttype]
@@ -906,6 +1043,22 @@ impl EscrowContract {
             .unwrap_or(Vec::new(&env))
     }
 
+    /// Return the list of registered multisig signers.
+    pub fn get_multisig_signers(env: Env) -> Vec<Address> {
+        env.storage()
+            .instance()
+            .get(&DataKey::MultiSigSigners)
+            .unwrap_or(Vec::new(&env))
+    }
+
+    /// Return the multisig approval threshold (number of signers required to approve an action).
+    pub fn get_multisig_threshold(env: Env) -> u32 {
+        env.storage()
+            .instance()
+            .get(&DataKey::MultiSigThreshold)
+            .unwrap_or(0)
+    }
+
     /// Check if the contract is paused.
     pub fn is_paused(env: Env) -> bool {
         env.storage()
@@ -951,6 +1104,22 @@ impl EscrowContract {
         Ok(())
     }
 
+    /// Return the registered dispute contract address, if any.
+    pub fn get_dispute_contract(env: Env) -> Option<Address> {
+        env.storage().instance().get(&DataKey::DisputeContract)
+    }
+
+    /// Return the maximum number of milestones a job or revision proposal may contain.
+    pub fn get_max_milestones(_env: Env) -> u32 {
+        MAX_MILESTONES
+    }
+
+    /// Return the number of seconds a revision proposal stays pending before it can be
+    /// expired. Falls back to the 7-day default when no expiry was configured.
+    pub fn get_proposal_expiry(env: Env) -> u64 {
+        proposal_expiry_secs(&env)
+    }
+
     /// Called by the registered dispute contract to transition a job to the Disputed state
     /// and emit a structured DisputeRaised event that indexers can consume.
     pub fn mark_job_disputed(
@@ -994,6 +1163,20 @@ impl EscrowContract {
             .get(&DataKey::RateSnapshot(job_id))
     }
 
+    /// Open a multi-sig proposal for an administrative action. The proposer's
+    /// address is recorded as the first approval; when the threshold is 1 and no
+    /// time-lock applies, the action executes immediately (so execution errors
+    /// below can surface from this call too).
+    ///
+    /// # Authorization
+    /// `proposer` must sign the invocation and already be in the multi-sig
+    /// signer set.
+    ///
+    /// # Errors
+    /// * `SignerNotFound`     — `proposer` is not a registered signer
+    /// * `GovernanceRequired` — governance is enabled and the action is one it owns
+    /// * `InvalidFee`         — `SetFeeBps` payload exceeds `MAX_FEE_BPS`
+    /// * execution errors from `execute_proposal_internal` when auto-executing
     pub fn propose_admin_action(
         env: Env,
         proposer: Address,
@@ -1011,6 +1194,16 @@ impl EscrowContract {
             return Err(EscrowError::GovernanceRequired);
         }
 
+        // Validate the action's payload before the proposal is stored and opened
+        // for approval (issue #1154). `execute_proposal_internal` re-checks this,
+        // but catching it here means signers never spend coordination effort
+        // approving a proposal that was invalid the moment it was created.
+        if let AdminAction::SetFeeBps(fee) = action {
+            if fee > MAX_FEE_BPS {
+                return Err(EscrowError::InvalidFee);
+            }
+        }
+
         let mut count: u64 = env
             .storage()
             .instance()
@@ -1026,6 +1219,7 @@ impl EscrowContract {
             AdminAction::Pause | AdminAction::SetTreasury(_) => {
                 now.saturating_add(MULTISIG_TIME_LOCK_SECS)
             }
+            AdminAction::ConfigureGovernance(..) => now.saturating_add(MULTISIG_TIME_LOCK_SECS),
             _ => now,
         };
 
@@ -1067,6 +1261,27 @@ impl EscrowContract {
         Ok(count)
     }
 
+    /// Return a multi-sig proposal by id, whether it is pending or archived.
+    pub fn get_multisig_proposal(env: Env, proposal_id: u64) -> Option<MultiSigProposal> {
+        load_proposal(&env, proposal_id)
+    }
+
+    /// Record an additional approval on a pending multi-sig proposal. When the
+    /// approval count reaches the threshold and the time-lock has elapsed, the
+    /// proposal executes immediately (so execution errors below can surface from
+    /// this call too).
+    ///
+    /// # Authorization
+    /// `approver` must sign the invocation and already be in the multi-sig
+    /// signer set; it must not have approved this proposal before.
+    ///
+    /// # Errors
+    /// * `SignerNotFound`          — `approver` is not a registered signer
+    /// * `MultiSigProposalNotFound` — no proposal with this ID
+    /// * `MultiSigAlreadyExecuted`  — the proposal has already been executed
+    /// * `MultiSigAlreadyApproved`  — `approver` has already approved it
+    /// * `ProposalExpired`          — the proposal is past `PROPOSAL_TTL`
+    /// * execution errors from `execute_proposal_internal` when threshold is met
     pub fn approve_admin_action(
         env: Env,
         approver: Address,
@@ -1077,11 +1292,8 @@ impl EscrowContract {
             return Err(EscrowError::SignerNotFound);
         }
 
-        let mut proposal: MultiSigProposal = env
-            .storage()
-            .instance()
-            .get(&DataKey::MultiSigProposal(proposal_id))
-            .ok_or(EscrowError::MultiSigProposalNotFound)?;
+        let mut proposal: MultiSigProposal =
+            load_proposal(&env, proposal_id).ok_or(EscrowError::MultiSigProposalNotFound)?;
 
         if proposal.executed {
             return Err(EscrowError::MultiSigAlreadyExecuted);
@@ -1124,6 +1336,25 @@ impl EscrowContract {
         Ok(())
     }
 
+    /// Execute a proposal that has already collected the approval threshold.
+    /// Delegates to `execute_proposal_internal`, which enacts the action and
+    /// archives the proposal.
+    ///
+    /// # Authorization
+    /// `caller` must sign the invocation and already be in the multi-sig signer
+    /// set. The proposal itself must independently satisfy its threshold and
+    /// time-lock; being a signer is not enough on its own.
+    ///
+    /// # Errors
+    /// * `SignerNotFound`          — `caller` is not a registered signer
+    /// * `MultiSigProposalNotFound` — no proposal with this ID
+    /// * `MultiSigAlreadyExecuted`  — the proposal has already been executed
+    /// * `ProposalExpired`          — the proposal is past `PROPOSAL_TTL`
+    /// * `Unauthorized`             — approvals are below the threshold
+    /// * `ProposalTimeLockActive`   — the time-lock has not elapsed yet
+    /// * `GovernanceRequired`       — governance is enabled and owns this action
+    /// * action-specific errors (e.g. `InvalidFee`, `InvalidThreshold`,
+    ///   `ContractNotPaused`, `JobNotFound`) raised while enacting the action
     pub fn execute_proposal(
         env: Env,
         caller: Address,
@@ -1136,12 +1367,49 @@ impl EscrowContract {
         Self::execute_proposal_internal(&env, proposal_id)
     }
 
-    fn execute_proposal_internal(env: &Env, proposal_id: u64) -> Result<(), EscrowError> {
-        let mut proposal: MultiSigProposal = env
+    /// Retires an expired multi-sig proposal from instance storage (issue #1153).
+    ///
+    /// Executed proposals are archived automatically by `execute_proposal_internal`,
+    /// but a proposal that never reached its approval threshold simply goes stale
+    /// and would otherwise sit in instance storage forever. Instance storage is
+    /// loaded in full on every contract invocation, so stale governance proposals
+    /// tax every unrelated call. This moves such a proposal to persistent storage
+    /// under a bounded TTL, leaving instance storage holding only genuinely
+    /// pending proposals.
+    ///
+    /// # Authorization
+    /// Permissionless, in the same spirit as `bump_escrow`: it is pure storage
+    /// maintenance. Only proposals that are already past `PROPOSAL_TTL` — and so
+    /// can no longer be approved or executed — are eligible, meaning a caller
+    /// cannot use this to interfere with live governance.
+    ///
+    /// # Errors
+    /// * `MultiSigProposalNotFound` — no pending proposal with this ID
+    /// * `ProposalNotExpirable`     — the proposal's TTL has not yet elapsed
+    pub fn prune_expired_proposal(env: Env, proposal_id: u64) -> Result<(), EscrowError> {
+        let proposal: MultiSigProposal = env
             .storage()
             .instance()
             .get(&DataKey::MultiSigProposal(proposal_id))
             .ok_or(EscrowError::MultiSigProposalNotFound)?;
+
+        if env.ledger().timestamp() <= proposal.created_at + PROPOSAL_TTL {
+            return Err(EscrowError::ProposalNotExpirable);
+        }
+
+        archive_proposal(&env, proposal_id, &proposal);
+
+        env.events().publish(
+            (symbol_short!("msig"), symbol_short!("pruned")),
+            (proposal_id, proposal.proposer),
+        );
+
+        Ok(())
+    }
+
+    fn execute_proposal_internal(env: &Env, proposal_id: u64) -> Result<(), EscrowError> {
+        let mut proposal: MultiSigProposal =
+            load_proposal(env, proposal_id).ok_or(EscrowError::MultiSigProposalNotFound)?;
 
         if proposal.executed {
             return Err(EscrowError::MultiSigAlreadyExecuted);
@@ -1181,6 +1449,13 @@ impl EscrowContract {
             return Err(EscrowError::GovernanceRequired);
         }
 
+        // Event contract: every successful action is represented by the generic
+        // `msig/executed` event below. Dedicated domain events are additionally
+        // emitted for Pause, Unpause, EmergencyWithdraw, and ConfigureGovernance.
+        // SetFeeBps, SetTreasury, AddSigner, RemoveSigner, ChangeThreshold, and
+        // RotateSigner intentionally have no dedicated event; indexers should
+        // decode those actions from the generic event rather than expect a
+        // second action-specific event schema.
         match proposal.action.clone() {
             AdminAction::Pause => {
                 env.storage().instance().set(&DataKey::Paused, &true);
@@ -1211,18 +1486,60 @@ impl EscrowContract {
                     .instance()
                     .set(&symbol_short!("TRE"), &treasury);
             }
+            AdminAction::ConfigureGovernance(
+                reputation,
+                voting_period_secs,
+                timelock_secs,
+                grace_secs,
+                quorum_votes,
+                pass_threshold_bps,
+                min_proposer_weight,
+            ) => {
+                // Defense in depth: re-validate at execution time, exactly as
+                // `SetFeeBps` does, so a proposal can never enact parameters
+                // that would be rejected if proposed today. EscrowError is at
+                // the SDK's variant cap, so this reuses the nearest generic
+                // variant — the same pattern `create_job` uses for its
+                // self-employment rejection. Callers proposing through
+                // `configure_governance` get the precise `GovError::InvalidParam`
+                // before any proposal is created.
+                if voting_period_secs == 0 || pass_threshold_bps == 0 || pass_threshold_bps > 10_000
+                {
+                    return Err(EscrowError::Unauthorized);
+                }
+                let config = governance::GovernanceConfig {
+                    reputation: reputation.clone(),
+                    voting_period_secs,
+                    timelock_secs,
+                    grace_secs,
+                    quorum_votes,
+                    pass_threshold_bps,
+                    min_proposer_weight,
+                };
+                env.storage()
+                    .instance()
+                    .set(&governance::GovKey::Config, &config);
+                env.events().publish(
+                    (symbol_short!("gov"), symbol_short!("config")),
+                    (proposal.proposer.clone(), reputation, voting_period_secs),
+                );
+            }
             AdminAction::AddSigner(signer) => {
                 let mut signers: Vec<Address> = env
                     .storage()
                     .instance()
                     .get(&DataKey::MultiSigSigners)
                     .unwrap();
-                if !signers.iter().any(|s| s == signer) {
-                    signers.push_back(signer);
-                    env.storage()
-                        .instance()
-                        .set(&DataKey::MultiSigSigners, &signers);
+                // A redundant add used to fall through silently and still mark the
+                // proposal executed, so nothing downstream could tell it apart from
+                // a real signer-set change. Fail loudly instead (issue #1155).
+                if signers.iter().any(|s| s == signer) {
+                    return Err(EscrowError::AlreadyInitialized);
                 }
+                signers.push_back(signer);
+                env.storage()
+                    .instance()
+                    .set(&DataKey::MultiSigSigners, &signers);
             }
             AdminAction::RemoveSigner(signer) => {
                 let mut signers: Vec<Address> = env
@@ -1236,15 +1553,20 @@ impl EscrowContract {
                     .get(&DataKey::MultiSigThreshold)
                     .unwrap_or(1);
 
-                if let Some(idx) = signers.iter().position(|s| s == signer) {
-                    if signers.len() <= threshold {
-                        return Err(EscrowError::InvalidThreshold);
-                    }
-                    signers.remove(idx as u32);
-                    env.storage()
-                        .instance()
-                        .set(&DataKey::MultiSigSigners, &signers);
+                // Removing an address that is not a signer is a no-op, not a
+                // success — report it the same way `RotateSigner` already does
+                // for an unknown old signer (issue #1155).
+                let idx = signers
+                    .iter()
+                    .position(|s| s == signer)
+                    .ok_or(EscrowError::SignerNotFound)?;
+                if signers.len() <= threshold {
+                    return Err(EscrowError::InvalidThreshold);
                 }
+                signers.remove(idx as u32);
+                env.storage()
+                    .instance()
+                    .set(&DataKey::MultiSigSigners, &signers);
             }
             AdminAction::ChangeThreshold(new_threshold) => {
                 let signers: Vec<Address> = env
@@ -1292,26 +1614,83 @@ impl EscrowContract {
                     .ok_or(EscrowError::JobNotFound)?;
                 bump_job_ttl(&env, job_id);
 
-                // Compute the remaining escrowed balance (total minus already-approved milestones).
-                let approved_amount: i128 = job
-                    .milestones
-                    .iter()
-                    .filter(|m| m.status == MilestoneStatus::Approved)
-                    .map(|m| m.amount)
-                    .sum();
-                let withdrawable = job.total_amount - approved_amount;
+                // Distinguish between the two payment models for Approved milestones:
+                //
+                // - Immediate-payment model (`release_milestone` / `finalize_inactivity_approval`
+                //   / `release_partial_payment`): funds were already disbursed to the freelancer,
+                //   so `MilestoneDisbursed` > 0. These amounts are genuinely gone from escrow and
+                //   must NOT be withdrawn by admin (would be a double-spend on re-funded balance).
+                //
+                // - Deferred-payment model (`approve_milestone` / `approve_milestones_batch`):
+                //   the milestone is marked Approved but NO funds have left the contract yet
+                //   (`MilestoneDisbursed` == 0). If we simply exclude these amounts from
+                //   `withdrawable` and then cancel the job, the funds are permanently stranded
+                //   because `complete_job` (the only normal payout path) can never run on a
+                //   Cancelled job. We must pay the freelancer for these milestones here.
+                //
+                // `get_milestone_disbursed` returns the cumulative amount already paid out via
+                // the immediate-payment path; 0 means no payment has left escrow for that
+                // milestone, regardless of its Approved status.
+                let token_client = token::Client::new(&env, &job.token);
 
-                if withdrawable <= 0 {
+                // Amount of deferred-approved milestone funds that must be paid to the
+                // freelancer as part of this emergency action (default token only; multi-token
+                // deferred milestones are handled per-token in the token_balances loop below).
+                let mut deferred_to_freelancer: i128 = 0;
+
+                // Amount of already-disbursed milestone funds (immediate model); these are
+                // already out of escrow, so we exclude them from what the admin can withdraw.
+                let mut already_paid: i128 = 0;
+
+                for ms in job.milestones.iter() {
+                    if ms.status != MilestoneStatus::Approved {
+                        continue;
+                    }
+                    // Only count default-token milestones here; token_balances loop handles
+                    // the rest for multi-token jobs.
+                    if ms.token.is_some() {
+                        continue;
+                    }
+                    let disbursed = get_milestone_disbursed(&env, job_id, ms.id);
+                    if disbursed > 0 {
+                        // Immediate model: funds already left escrow. Exclude from withdrawable.
+                        already_paid = already_paid.saturating_add(ms.amount);
+                    } else {
+                        // Deferred model: funds still sit in escrow but are owed to the
+                        // freelancer. Pay them out now before the job becomes Cancelled.
+                        deferred_to_freelancer = deferred_to_freelancer.saturating_add(ms.amount);
+                    }
+                }
+
+                // Remaining escrowed default-token balance available for admin withdrawal:
+                // total funded minus what's already been paid (immediate model) minus what
+                // we are about to pay the freelancer (deferred model).
+                let withdrawable = job
+                    .total_amount
+                    .saturating_sub(already_paid)
+                    .saturating_sub(deferred_to_freelancer);
+
+                // At least one of deferred_to_freelancer or withdrawable must be > 0
+                // for there to be any action to take.
+                if deferred_to_freelancer <= 0 && withdrawable <= 0 {
                     return Err(EscrowError::NoFundsToWithdraw);
                 }
 
-                // Only transfer if the job held funded escrow.
+                // Only operate on jobs that actually hold escrowed funds.
                 if job.status == JobStatus::Funded
                     || job.status == JobStatus::InProgress
                     || job.status == JobStatus::Disputed
                 {
-                    // Withdraw the default token.
-                    let token_client = token::Client::new(&env, &job.token);
+                    // Pay deferred-approved milestone funds to the freelancer first.
+                    if deferred_to_freelancer > 0 {
+                        token_client.transfer(
+                            &env.current_contract_address(),
+                            &job.freelancer,
+                            &deferred_to_freelancer,
+                        );
+                    }
+
+                    // Withdraw the remaining default-token escrow balance to the admin recipient.
                     if withdrawable > 0 {
                         token_client.transfer(
                             &env.current_contract_address(),
@@ -1319,15 +1698,54 @@ impl EscrowContract {
                             &withdrawable,
                         );
                     }
-                    // Withdraw all non-default tokens for multi-token jobs.
+
+                    // For multi-token jobs, apply the same deferred-vs-immediate distinction
+                    // per non-default token bucket.
                     let tb_len = job.token_balances.len();
                     for idx in 0..tb_len {
                         let tb = job.token_balances.get(idx).unwrap();
-                        if tb.funded_amount > 0 {
-                            token::Client::new(&env, &tb.token).transfer(
+                        if tb.funded_amount <= 0 {
+                            continue;
+                        }
+                        let tb_token_client = token::Client::new(&env, &tb.token);
+
+                        // Identify deferred-approved amounts for this non-default token.
+                        let mut tb_deferred: i128 = 0;
+                        let mut tb_already_paid: i128 = 0;
+                        for ms in job.milestones.iter() {
+                            if ms.status != MilestoneStatus::Approved {
+                                continue;
+                            }
+                            if ms.token.as_ref() != Some(&tb.token) {
+                                continue;
+                            }
+                            let disbursed = get_milestone_disbursed(&env, job_id, ms.id);
+                            if disbursed > 0 {
+                                tb_already_paid = tb_already_paid.saturating_add(ms.amount);
+                            } else {
+                                tb_deferred = tb_deferred.saturating_add(ms.amount);
+                            }
+                        }
+
+                        // Pay deferred amounts to freelancer for this token.
+                        if tb_deferred > 0 {
+                            tb_token_client.transfer(
+                                &env.current_contract_address(),
+                                &job.freelancer,
+                                &tb_deferred,
+                            );
+                        }
+
+                        // Withdraw remaining funded balance (minus already-paid and deferred).
+                        let tb_withdrawable = tb
+                            .funded_amount
+                            .saturating_sub(tb_already_paid)
+                            .saturating_sub(tb_deferred);
+                        if tb_withdrawable > 0 {
+                            tb_token_client.transfer(
                                 &env.current_contract_address(),
                                 &recipient,
-                                &tb.funded_amount,
+                                &tb_withdrawable,
                             );
                         }
                     }
@@ -1347,18 +1765,9 @@ impl EscrowContract {
         }
 
         proposal.executed = true;
-        env.storage()
-            .instance()
-            .set(&DataKey::MultiSigProposal(proposal_id), &proposal);
-        if env
-            .storage()
-            .instance()
-            .has(&DataKey::MultiSigExecutionNotBefore(proposal_id))
-        {
-            env.storage()
-                .instance()
-                .remove(&DataKey::MultiSigExecutionNotBefore(proposal_id));
-        }
+        // Terminal state: retire the proposal from instance storage so it stops
+        // being loaded on every invocation of this contract (issue #1153).
+        archive_proposal(env, proposal_id, &proposal);
 
         env.events().publish(
             (symbol_short!("msig"), symbol_short!("executed")),
@@ -1838,8 +2247,19 @@ impl EscrowContract {
     }
 
     /// Called by the dispute contract to resolve a disputed job and distribute funds.
-    /// Uses the full DisputeResolution enum to correctly handle all four outcomes,
+    /// Uses the full DisputeResolution enum to correctly handle every outcome,
     /// including the zero-remaining edge case where only the job status needs updating.
+    ///
+    /// Outcomes: `FreelancerWins` → `Completed`; `ClientWins`, `RefundBoth`,
+    /// `RefundSplit` and `MaliciousFiling` → `Cancelled`; `Escalate` → **no state
+    /// change and no payout** — the job stays in its current (`Disputed`) state with
+    /// the escrow intact, awaiting either another call to this function with a final
+    /// resolution or `expire_job` after the deadline. See the [`JobStatus`]
+    /// state-machine docs, "Escalated disputes", for the full rationale.
+    ///
+    /// Because [`require_state_disputable`] accepts `Disputed`, this function is
+    /// deliberately re-callable: escalation is a hand-off to a higher arbitration
+    /// tier, not a final answer.
     pub fn resolve_dispute_callback(
         env: Env,
         job_id: u64,
@@ -1920,7 +2340,12 @@ impl EscrowContract {
                 job.status = JobStatus::Completed;
             }
             DisputeResolution::Escalate => {
-                // Leave status unchanged.
+                // Leave status unchanged: the job stays Disputed (a self-loop) with
+                // the escrow untouched. Escalation hands the case to a higher
+                // arbitration tier, which is expected to call this function again
+                // with a final resolution; `expire_job` remains the backstop once
+                // the deadline passes. Documented on `JobStatus` under
+                // "Escalated disputes".
             }
         }
 
@@ -2254,6 +2679,30 @@ impl EscrowContract {
         Ok(total_released)
     }
 
+    /// Return when the milestone was submitted, or `None` if it has not been submitted
+    /// or the submission timestamp is no longer active.
+    pub fn get_milestone_submitted_at(
+        env: Env,
+        job_id: u64,
+        milestone_id: u32,
+    ) -> Option<u64> {
+        env.storage()
+            .persistent()
+            .get(&DataKey::MilestoneSubmittedAt(job_id, milestone_id))
+    }
+
+    /// Return when inactivity auto-approval will become eligible, or `None` if no
+    /// inactivity timer is currently active for the milestone.
+    pub fn get_inactivity_auto_approve_at(
+        env: Env,
+        job_id: u64,
+        milestone_id: u32,
+    ) -> Option<u64> {
+        env.storage()
+            .persistent()
+            .get(&DataKey::InactivityAutoApproveAt(job_id, milestone_id))
+    }
+
     /// After a milestone is submitted, allow either party to trigger an inactivity-based
     /// auto-approval flow when the client is unresponsive for a threshold duration.
     pub fn trigger_inactivity_extension(
@@ -2427,6 +2876,14 @@ impl EscrowContract {
         } else if freelancer_amount > 0 {
             token_client.transfer(&env.current_contract_address(), &job.freelancer, &freelancer_amount);
         }
+
+        // Record that the full nominal milestone amount has been disbursed so that
+        // EmergencyWithdraw recognises this as the immediate-payment model
+        // (MilestoneDisbursed > 0) and does NOT pay the freelancer a second time.
+        // release_milestone and release_partial_payment do the same thing; omitting
+        // this call here would cause a double-pay if EmergencyWithdraw runs after
+        // finalize_inactivity_approval.
+        record_milestone_disbursed(&env, job_id, milestone.id, milestone.amount);
 
         let updated = Milestone {
             id: milestone.id,
@@ -2769,9 +3226,7 @@ impl EscrowContract {
         if job.client != client {
             return Err(EscrowError::Unauthorized);
         }
-        if job.status == JobStatus::Disputed {
-            return Err(EscrowError::InvalidStatus);
-        }
+        require_state_not_disputed(&job)?;
 
         let mut milestones = job.milestones.clone();
         let milestone = milestones
@@ -3172,7 +3627,8 @@ impl EscrowContract {
     /// * `NotAdmin`           — caller is not a registered signer
     /// * `JobNotFound`        — job does not exist
     /// * `InvalidStatus`      — job is in a terminal state (Completed, Cancelled, Expired, Created)
-    /// * `InsufficientFunds`  — amount <= 0 or amount > remaining locked balance
+    /// * `InvalidAmount`      — amount is zero or negative
+    /// * `InsufficientFunds`  — amount exceeds the remaining locked balance
     pub fn partial_refund(
         env: Env,
         caller: Address,
@@ -3213,7 +3669,11 @@ impl EscrowContract {
             .sum();
         let remaining = job.total_amount - approved_amount;
 
-        if amount <= 0 || amount > remaining {
+        if amount <= 0 {
+            return Err(EscrowError::InvalidAmount);
+        }
+
+        if amount > remaining {
             return Err(EscrowError::InsufficientFunds);
         }
 
@@ -3329,6 +3789,26 @@ impl EscrowContract {
         require_state_not_terminal(&job)?;
         require_state_not_disputed(&job)?;
 
+        // Reject proposals that would orphan an active sub-assignment.
+        // A sub-assignment is keyed by milestone id; if the proposal drops or renumbers
+        // a milestone that carries an active sub-assignment, the sub-freelancer would have
+        // no remaining payout path after acceptance.
+        for old_ms in job.milestones.iter() {
+            let sub_key = DataKey::SubAssignment(job_id, old_ms.id);
+            if let Some(sub) = env
+                .storage()
+                .persistent()
+                .get::<DataKey, SubAssignment>(&sub_key)
+            {
+                if sub.status == SubAssignmentStatus::Active {
+                    let retained = new_milestones.iter().any(|m| m.id == old_ms.id);
+                    if !retained {
+                        return Err(EscrowError::InvalidStatus);
+                    }
+                }
+            }
+        }
+
         // 3. Assert no existing Pending proposal, allowing overwrite of expired ones
         if let Some(existing) = env
             .storage()
@@ -3336,11 +3816,7 @@ impl EscrowContract {
             .get::<DataKey, RevisionProposal>(&DataKey::RevisionProposal(job_id))
         {
             if existing.status == ProposalStatus::Pending {
-                let expiry_secs: u64 = env
-                    .storage()
-                    .instance()
-                    .get(&DataKey::ProposalExpiry)
-                    .unwrap_or(DEFAULT_PROPOSAL_EXPIRY_SECS);
+                let expiry_secs = proposal_expiry_secs(&env);
                 let now = env.ledger().timestamp();
                 if now < existing.created_at + expiry_secs {
                     return Err(EscrowError::RevisionProposalAlreadyExists);
@@ -3519,6 +3995,42 @@ impl EscrowContract {
                 .any(|m| m.id == old_milestone.id && m.amount >= disbursed);
             if !still_covered {
                 return Err(EscrowError::RevisionBelowDisbursedAmount);
+            }
+        }
+
+        // Sub-assignment reconciliation: for every old milestone that carries an active
+        // sub-assignment, (a) block proposals that drop the milestone id entirely — the
+        // sub-freelancer would have no remaining payout path — and (b) proportionally
+        // scale the sub-amount when the milestone budget shrinks, so neither party is
+        // left with a disproportionate zero-payout. This is a safety net even when
+        // propose_revision already caught the orphan case, because a sub-assignment
+        // could be created in the window between propose and accept.
+        for old_ms in job.milestones.iter() {
+            let sub_key = DataKey::SubAssignment(job_id, old_ms.id);
+            let sub_opt: Option<SubAssignment> = env.storage().persistent().get(&sub_key);
+            if let Some(mut sub) = sub_opt {
+                if sub.status != SubAssignmentStatus::Active {
+                    continue;
+                }
+                let new_ms_opt = proposal.new_milestones.iter().find(|m| m.id == old_ms.id);
+                match new_ms_opt {
+                    None => {
+                        return Err(EscrowError::InvalidStatus);
+                    }
+                    Some(new_ms) if new_ms.amount < sub.amount => {
+                        // Scale proportionally: new_sub = sub.amount * new_ms.amount / old_ms.amount.
+                        // old_ms.amount > 0 is guaranteed by milestone validation at creation/propose time.
+                        let new_sub_amount = (sub.amount * new_ms.amount) / old_ms.amount;
+                        sub.amount = new_sub_amount;
+                        env.storage().persistent().set(&sub_key, &sub);
+                        env.storage().persistent().extend_ttl(
+                            &sub_key,
+                            TTL_THRESHOLD_LEDGERS,
+                            TTL_EXTEND_TO_LEDGERS,
+                        );
+                    }
+                    _ => {}
+                }
             }
         }
 
@@ -3825,11 +4337,7 @@ impl EscrowContract {
         }
 
         // Check if the proposal TTL has elapsed.
-        let expiry_secs: u64 = env
-            .storage()
-            .instance()
-            .get(&DataKey::ProposalExpiry)
-            .unwrap_or(DEFAULT_PROPOSAL_EXPIRY_SECS);
+        let expiry_secs = proposal_expiry_secs(&env);
         let now = env.ledger().timestamp();
         if now < proposal.created_at + expiry_secs {
             return Err(EscrowError::ProposalNotExpirable);
@@ -4170,6 +4678,12 @@ impl EscrowContract {
             .get(&DataKey::SubAssignment(job_id, milestone_id))
     }
 
+    /// Return the cumulative amount paid to the freelancer for a milestone.
+    /// Returns `0` if no amount has been disbursed.
+    pub fn get_milestone_disbursed(env: Env, job_id: u64, milestone_id: u32) -> i128 {
+        get_milestone_disbursed(&env, job_id, milestone_id)
+    }
+
     /// Get job details by ID.
     pub fn get_job(env: Env, job_id: u64) -> Result<Job, EscrowError> {
         bump_escrow_ttl(&env, job_id);
@@ -4231,6 +4745,9 @@ impl EscrowContract {
         // (Completed, Cancelled, or Expired).  These are the same guard used by
         // propose_revision and submit_milestone.
         require_state_not_terminal(&job)?;
+        // Reject calls while a dispute is active — arbitrators and the other
+        // party rely on deadline state staying fixed during resolution.
+        require_state_not_disputed(&job)?;
 
         let mut milestones = job.milestones.clone();
         let mut milestone = milestones
@@ -4246,12 +4763,6 @@ impl EscrowContract {
         if new_deadline <= milestone.deadline {
             return Err(EscrowError::InvalidDeadline);
         }
-
-        // If the business rule requires it, this can be re-enabled to prevent
-        // milestone deadlines from moving beyond the job-level deadline.
-        // if new_deadline > job.job_deadline {
-        //     return Err(EscrowError::InvalidDeadline);
-        // }
 
         milestone.deadline = new_deadline;
         milestones.set(milestone_id, milestone);

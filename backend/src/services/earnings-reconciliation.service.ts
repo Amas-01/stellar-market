@@ -256,16 +256,30 @@ export async function reconcileEarnings(
   ]);
 
   const dbByTxHash = new Map(dbRecords.map((r) => [r.txHash, r]));
-  const dbByJobId = new Map(dbRecords.filter((r) => r.jobId).map((r) => [r.jobId as string, r]));
+
+  // A job can have several earnings records (e.g. one per milestone release), so each
+  // jobId maps to a list. A single-valued map would keep only the last record per job.
+  const dbByJobId = new Map<string, EarningsRecord[]>();
+  for (const r of dbRecords) {
+    if (!r.jobId) continue;
+    const records = dbByJobId.get(r.jobId) ?? [];
+    records.push(r);
+    dbByJobId.set(r.jobId, records);
+  }
 
   const matchedTxHashes = new Set<string>();
   const matched: MatchedEarning[] = [];
   const onChainOnly: OnChainOnlyEarning[] = [];
 
   for (const payment of onChainPayments) {
-    const dbRecord =
-      dbByTxHash.get(payment.txHash) ??
-      (payment.memoJobId ? dbByJobId.get(payment.memoJobId) : undefined);
+    let dbRecord = dbByTxHash.get(payment.txHash);
+    if (!dbRecord && payment.memoJobId) {
+      // Take the first record for this job that no earlier payment has already matched,
+      // so each on-chain payment consumes a distinct record.
+      dbRecord = dbByJobId
+        .get(payment.memoJobId)
+        ?.find((r) => !matchedTxHashes.has(r.txHash));
+    }
 
     if (dbRecord) {
       matchedTxHashes.add(dbRecord.txHash);
