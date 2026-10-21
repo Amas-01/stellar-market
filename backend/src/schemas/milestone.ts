@@ -29,3 +29,12 @@ export const getMilestonesQuerySchema = paginationSchema.extend({
 export const getMilestoneByIdParamSchema = z.object({
   id: z.string().min(1, "ID is required"),
 });
+
+export const deliverableParamSchema = z.object({
+  id: z.string().min(1, "ID is required"),
+});
+
+export const deliverableDeleteParamSchema = z.object({
+  id: z.string().min(1, "ID is required"),
+  attachmentId: z.string().min(1, "Attachment ID is required"),
+});
