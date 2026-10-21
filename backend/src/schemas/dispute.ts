@@ -51,7 +51,14 @@ export const initRaiseDisputeSchema = z.object({
     .string()
     .min(10, { message: "Reason must be at least 10 characters long" })
     .max(2000, { message: "Reason must not exceed 2000 characters" }),
-  minVotes: z.coerce.number().int().min(1).optional(),
+  minVotes: z.coerce
+    .number()
+    .int()
+    .min(1)
+    .max(5, {
+      message: "minVotes must not exceed the 5 arbitrators assigned per dispute",
+    })
+    .optional(),
 });
 
 export const confirmDisputeTransactionSchema = z.object({

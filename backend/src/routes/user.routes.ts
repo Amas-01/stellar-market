@@ -232,6 +232,11 @@ router.get(
     const limit = query.limit ?? 10;
     const skip = (page - 1) * limit;
 
+    const user = await prisma.user.findUnique({ where: { id } });
+    if (!user) {
+      return res.status(404).json({ error: "User not found." });
+    }
+
     const [jobs, total] = await Promise.all([
       prisma.job.findMany({
         where: {
