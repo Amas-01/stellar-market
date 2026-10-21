@@ -37,7 +37,7 @@ function parseFiltersFromParams(searchParams: URLSearchParams): ServiceFilters {
     maxPrice: searchParams.get("maxPrice") || "",
     minRating: searchParams.get("minRating") || "",
     sort: searchParams.get("sort") || "newest",
-    page: isNaN(page) ? 1 : page,
+    page: isNaN(page) ? 1 : Math.max(1, page),
   };
 }
 
