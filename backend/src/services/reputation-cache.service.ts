@@ -44,6 +44,53 @@ export class ReputationCacheService {
   private static isWarmedUp = false;
 
   /**
+   * Get cached reputation for multiple wallet addresses in one batch.
+   * Uses Redis MGET for cache hits; falls back to individual fetches for misses.
+   */
+  static async getBatchCachedReputation(
+    walletAddresses: string[]
+  ): Promise<Map<string, OnChainReputation | null>> {
+    const result = new Map<string, OnChainReputation | null>();
+    const validAddresses = [...new Set(walletAddresses.filter(Boolean))];
+
+    if (validAddresses.length === 0) return result;
+
+    if (RedisClient.isRedisConnected()) {
+      const redis = RedisClient.getInstance();
+      const keys = validAddresses.map((addr) => `${CACHE_KEY_PREFIX}${addr}`);
+      const cached = await redis.mget(...keys);
+
+      const missing: string[] = [];
+      for (let i = 0; i < validAddresses.length; i++) {
+        if (cached[i]) {
+          result.set(validAddresses[i], JSON.parse(cached[i]!) as OnChainReputation);
+        } else {
+          missing.push(validAddresses[i]);
+          result.set(validAddresses[i], null);
+        }
+      }
+
+      if (missing.length > 0) {
+        await Promise.allSettled(
+          missing.map(async (addr) => {
+            const data = await this.getCachedReputation(addr);
+            result.set(addr, data);
+          })
+        );
+      }
+    } else {
+      await Promise.allSettled(
+        validAddresses.map(async (addr) => {
+          const data = await this.getCachedReputation(addr);
+          result.set(addr, data);
+        })
+      );
+    }
+
+    return result;
+  }
+
+  /**
    * Get cached reputation for a wallet address
    * Falls back to on-chain fetch if cache miss
    */
