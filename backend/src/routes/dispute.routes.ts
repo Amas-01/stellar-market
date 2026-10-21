@@ -32,6 +32,7 @@ import {
   initiateEvidenceSessionSchema,
   evidenceSessionParamSchema,
   evidenceChunkParamSchema,
+  evidenceIdParamSchema,
 } from "../schemas/dispute";
 import {
   assembleAndVerify,
@@ -941,6 +942,17 @@ router.get(
   asyncHandler(async (req: AuthRequest, res: Response) => {
     const disputeId = req.params.id as string;
 
+    const access = await assertDisputeViewerAccess(
+      disputeId,
+      req.userId!,
+      req.userRole,
+    );
+
+    if (!access.allowed) {
+      res.status(access.status).json({ error: access.error });
+      return;
+    }
+
     const attachments = await prisma.attachment.findMany({
       where: { disputeId },
       include: {
@@ -1035,7 +1047,21 @@ router.get(
 router.get(
   "/:id/evidence/:evidenceId/verify",
   authenticate,
+  validate({ params: evidenceIdParamSchema }),
   asyncHandler(async (req: AuthRequest, res: Response) => {
+    const disputeId = req.params.id as string;
+
+    const access = await assertDisputeViewerAccess(
+      disputeId,
+      req.userId!,
+      req.userRole,
+    );
+
+    if (!access.allowed) {
+      res.status(access.status).json({ error: access.error });
+      return;
+    }
+
     const attachment = await prisma.attachment.findFirst({
       where: {
         id: req.params.evidenceId as string,

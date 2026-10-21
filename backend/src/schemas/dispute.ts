@@ -45,6 +45,11 @@ export const evidenceChunkParamSchema = z.object({
     .regex(/^\d+$/, { message: "Chunk index must be a non-negative integer" }),
 });
 
+export const evidenceIdParamSchema = z.object({
+  id: z.string().min(1, { message: "Dispute ID is required" }),
+  evidenceId: z.string().min(1, { message: "Evidence ID is required" }),
+});
+
 export const initRaiseDisputeSchema = z.object({
   jobId: z.string().min(1, { message: "Job ID is required" }),
   reason: z
