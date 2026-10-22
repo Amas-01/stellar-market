@@ -173,8 +173,8 @@ router.post(
       }
 
       const originalPath = req.file.path;
-      const ext = path.extname(req.file.filename);
-      const processedFilename = `avatar-${Date.now()}-processed${ext}`;
+      
+      const processedFilename = `avatar-${Date.now()}-processed.jpg`;
       const processedPath = path.join(AVATAR_UPLOAD_DIR, processedFilename);
 
       try {
@@ -231,6 +231,11 @@ router.get(
     const page = query.page ?? 1;
     const limit = query.limit ?? 10;
     const skip = (page - 1) * limit;
+
+    const user = await prisma.user.findUnique({ where: { id } });
+    if (!user) {
+      return res.status(404).json({ error: "User not found." });
+    }
 
     const [jobs, total] = await Promise.all([
       prisma.job.findMany({
@@ -561,22 +566,25 @@ router.get(
       prisma.user.count({ where }),
     ]);
 
-    const usersWithReputation = await Promise.all(
-      users.map(async (user) => {
-        if (user.role === "FREELANCER" && user.walletAddress) {
-          const reputation = await ReputationCacheService.getCachedReputation(user.walletAddress);
-          return {
-            ...user,
-            reputation: reputation ? {
-              totalScore: reputation.score.toString(),
-              totalWeight: reputation.endorsementWeight.toString(),
-              reviewCount: 0,
-            } : null,
-          };
-        }
-        return user;
-      })
-    );
+    const freelancerAddresses = users
+      .filter((u) => u.role === "FREELANCER" && u.walletAddress)
+      .map((u) => u.walletAddress!);
+    const reputationMap = await ReputationCacheService.getBatchCachedReputation(freelancerAddresses);
+
+    const usersWithReputation = users.map((user) => {
+      if (user.role === "FREELANCER" && user.walletAddress) {
+        const reputation = reputationMap.get(user.walletAddress) ?? null;
+        return {
+          ...user,
+          reputation: reputation ? {
+            totalScore: reputation.score.toString(),
+            totalWeight: reputation.endorsementWeight.toString(),
+            reviewCount: 0,
+          } : null,
+        };
+      }
+      return user;
+    });
 
     res.json({
       users: usersWithReputation,

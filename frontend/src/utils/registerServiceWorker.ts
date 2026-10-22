@@ -57,7 +57,7 @@ export async function registerServiceWorker() {
  * @returns void - Does not wait for unregistration to complete.
  */
 export function unregisterServiceWorker() {
-  if ('serviceWorker' in navigator) {
+  if (typeof window !== 'undefined' && 'serviceWorker' in navigator) {
     navigator.serviceWorker.ready.then((registration) => {
       registration.unregister();
     });

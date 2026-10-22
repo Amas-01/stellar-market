@@ -69,7 +69,7 @@ export function parseFiltersFromParams(searchParams: URLSearchParams): JobFilter
     maxBudget: searchParams.get("max") || "",
     postedDate: searchParams.get("posted") || "all",
     sort: searchParams.get("sort") || "newest",
-    page: isNaN(page) ? 1 : page,
+    page: isNaN(page) ? 1 : Math.max(1, page),
   };
 }
 

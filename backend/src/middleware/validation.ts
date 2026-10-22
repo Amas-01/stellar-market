@@ -1,5 +1,6 @@
 import { Request, Response, NextFunction } from "express";
 import { ZodSchema, ZodError } from "zod";
+import * as fs from "fs";
 
 export const validate = (schema: {
   body?: ZodSchema;
@@ -28,6 +29,9 @@ export const validate = (schema: {
 
       next();
     } catch (error) {
+      if (req.file && fs.existsSync(req.file.path)) {
+        fs.unlinkSync(req.file.path);
+      }
       if (error instanceof ZodError) {
         // Special-case: budget below platform minimum → 422 with dedicated code
         const budgetMinimumError = error.issues.find(

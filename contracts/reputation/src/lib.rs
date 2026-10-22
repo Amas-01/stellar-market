@@ -174,6 +174,11 @@ pub enum ReputationError {
     /// mistyped proposal id (issue #1434). Genuine authorization checks are
     /// unaffected and still return `NotAdmin`.
     ProposalNotFound = 31,
+    /// Rejected when `claim_stake` is asked to withdraw a non-positive amount, or
+    /// more than the reviewer's current `StakeBalance`. This used to reuse
+    /// `BelowMinStake`, which callers read as "raise your stake", not "fix the
+    /// claim amount" (issue #1548).
+    InvalidClaimAmount = 32,
 }
 
 #[contracttype]
@@ -269,12 +274,20 @@ pub enum ScoreBadge {
     Elite = 3,
 }
 
+/// Outcome of a dispute, passed by the dispute contract to `apply_dispute_outcome`.
+/// Each variant shifts the affected user's score by a fixed amount, given by
+/// `DISPUTE_OUTCOME_WON_SCORE`, `DISPUTE_OUTCOME_LOST_SCORE`, and
+/// `DISPUTE_OUTCOME_MALICIOUS_FILING_SCORE`.
 #[contracttype]
 #[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
 #[repr(u32)]
 pub enum DisputeOutcome {
+    /// The user won the dispute. Applies `DISPUTE_OUTCOME_WON_SCORE` (+50).
     Won = 0,
+    /// The user lost the dispute. Applies `DISPUTE_OUTCOME_LOST_SCORE` (-100).
     Lost = 1,
+    /// The user filed the dispute in bad faith. Applies
+    /// `DISPUTE_OUTCOME_MALICIOUS_FILING_SCORE` (-250).
     MaliciousFiling = 2,
 }
 
@@ -293,12 +306,21 @@ pub struct AwardedBadge {
     pub awarded_at: u64,
 }
 
+/// Lifecycle state of a [`ReviewAppeal`].
+///
+/// An appeal starts as `Pending` when `appeal_review` files it. An admin then
+/// moves it to `Dismissed` or `ReviewRemoved` via `admin_resolve_appeal`, and
+/// removing the review through the admin removal path also sets `ReviewRemoved`.
+/// Once resolved, an appeal cannot be resolved again.
 #[contracttype]
 #[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
 #[repr(u32)]
 pub enum AppealStatus {
+    /// Filed and awaiting an admin decision.
     Pending = 0,
+    /// The admin rejected the appeal, and the review stands.
     Dismissed = 1,
+    /// The review was removed, either by upholding the appeal or through the admin removal path.
     ReviewRemoved = 2,
 }
 
@@ -1603,6 +1625,27 @@ impl ReputationContract {
             .unwrap_or(0)
     }
 
+    /// Get the current referral bonus configuration.
+    ///
+    /// Returns the configured bonus rating credited to a referrer when their
+    /// referee triggers `process_referral_bonus`, or `DEFAULT_REFERRAL_BONUS`
+    /// (5) if unset.
+    pub fn get_referral_bonus(env: Env) -> u64 {
+        env.storage()
+            .instance()
+            .get(&DataKey::ReferralBonus)
+            .unwrap_or(DEFAULT_REFERRAL_BONUS)
+    }
+
+    /// Get the configured maximum decay rate ceiling.
+    ///
+    /// Returns the super-admin configured upper bound for `decay_rate`, or
+    /// `MAX_DECAY_RATE` (20) if unset. This ceiling itself is capped at
+    /// `MAX_DECAY_RATE_HARD_CEILING` (50) by `set_max_decay_rate`.
+    pub fn get_max_decay_rate(env: Env) -> u32 {
+        effective_max_decay_rate(&env)
+    }
+
     /// Set the minimum stake weight threshold (admin/signer only).
     /// Reviews submitted with stake_weight below this value are rejected with StakeTooLow.
     pub fn set_min_stake_weight(
@@ -2062,6 +2105,11 @@ impl ReputationContract {
         env.storage().persistent().set(&list_key, &endorsers);
         bump_endorsement_ttl(&env, &target, &skill, &endorser);
 
+        env.events().publish(
+            (symbol_short!("reput"), symbol_short!("endorsed")),
+            (endorser, target, skill),
+        );
+
         Ok(())
     }
 
@@ -2290,7 +2338,7 @@ impl ReputationContract {
         let balance: i128 = env.storage().persistent().get(&balance_key).unwrap_or(0);
 
         if balance < amount || amount <= 0 {
-            return Err(ReputationError::BelowMinStake);
+            return Err(ReputationError::InvalidClaimAmount);
         }
 
         // Lockup enforcement: reject claims where the stake is younger than
@@ -2690,6 +2738,58 @@ impl ReputationContract {
         );
 
         Ok(())
+    }
+
+    /// Get the configured stake tier schedule. Returns an empty vec if no tiers are set.
+    pub fn get_stake_tiers(env: Env) -> Vec<StakeTier> {
+        env.storage()
+            .instance()
+            .get(&DataKey::StakeTiers)
+            .unwrap_or(Vec::new(&env))
+    }
+
+    /// Check if a user is banned. Banned users are excluded from leaderboard results.
+    pub fn is_banned(env: Env, user: Address) -> bool {
+        env.storage()
+            .instance()
+            .get(&DataKey::BannedUser(user))
+            .unwrap_or(false)
+    }
+
+    /// Get the referral bonus history for a user. Returns an empty vec if no bonuses exist.
+    /// Mirrors the pattern of get_reviews for consistency across similar data structures.
+    pub fn get_referral_bonuses(env: Env, user: Address) -> Vec<ReferralBonusRecord> {
+        let bonuses_key = DataKey::ReferralBonusList(user);
+        let bonuses: Option<Vec<ReferralBonusRecord>> = env.storage().persistent().get(&bonuses_key);
+        match bonuses {
+            Some(list) => {
+                env.storage().persistent().extend_ttl(
+                    &bonuses_key,
+                    MIN_TTL_THRESHOLD,
+                    MIN_TTL_EXTEND_TO,
+                );
+                list
+            }
+            None => Vec::new(&env),
+        }
+    }
+
+    /// Get when a reviewer's staked tokens unlock. Returns the timestamp when the
+    /// stake lockup period ends, or 0 if no lockup is active (no stake or already expired).
+    /// Use this to show "stake unlocks in N days" in wallet/UI integrations.
+    pub fn get_stake_lockup_expiry(env: Env, user: Address) -> u64 {
+        let lockup_key = DataKey::StakeLockupTs(user);
+        let staked_at: u64 = env
+            .storage()
+            .persistent()
+            .get(&lockup_key)
+            .unwrap_or(0u64);
+
+        if staked_at == 0 {
+            return 0;
+        }
+
+        staked_at.saturating_add(STAKE_LOCKUP_SECONDS)
     }
 
     pub fn get_review_appeal(

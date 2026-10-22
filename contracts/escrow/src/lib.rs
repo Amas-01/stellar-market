@@ -499,12 +499,31 @@ const TWAP_SAMPLE_LEDGERS: u32 = 10;
 
 /// Default proposal expiry: 7 days in seconds.
 const DEFAULT_PROPOSAL_EXPIRY_SECS: u64 = 7 * 24 * 3600;
+/// Time after a milestone is submitted before the client's inactivity auto-approval
+/// can be scheduled (7 days).
 const INACTIVITY_THRESHOLD_SECS: u64 = 7 * 24 * 3600;
+/// Grace period between scheduling an inactivity auto-approval and its execution,
+/// during which the client can still act on the milestone (3 days).
 const INACTIVITY_GRACE_SECS: u64 = 3 * 24 * 3600;
+/// Time lock on multi-sig `Pause`, `SetTreasury`, and `ConfigureGovernance` actions
+/// before they can execute (48 hours).
 const MULTISIG_TIME_LOCK_SECS: u64 = 48 * 60 * 60;
+/// Lifetime of a multi-sig proposal: once this many seconds have passed since creation,
+/// it can no longer be executed and may be archived (7 days).
 const PROPOSAL_TTL: u64 = 7 * 24 * 60 * 60;
 
+/// Number of ledgers a consumed nonce is kept in temporary storage, which bounds
+/// the replay-protection window.
 const NONCE_EXPIRY_LEDGERS: u32 = 3;
+
+/// Returns the configured revision-proposal expiry in seconds, or the default
+/// when none was set during `initialize`.
+fn proposal_expiry_secs(env: &Env) -> u64 {
+    env.storage()
+        .instance()
+        .get(&DataKey::ProposalExpiry)
+        .unwrap_or(DEFAULT_PROPOSAL_EXPIRY_SECS)
+}
 
 fn get_job_key(job_id: u64) -> DataKey {
     DataKey::Job(job_id)
@@ -1088,6 +1107,17 @@ impl EscrowContract {
     /// Return the registered dispute contract address, if any.
     pub fn get_dispute_contract(env: Env) -> Option<Address> {
         env.storage().instance().get(&DataKey::DisputeContract)
+    }
+
+    /// Return the maximum number of milestones a job or revision proposal may contain.
+    pub fn get_max_milestones(_env: Env) -> u32 {
+        MAX_MILESTONES
+    }
+
+    /// Return the number of seconds a revision proposal stays pending before it can be
+    /// expired. Falls back to the 7-day default when no expiry was configured.
+    pub fn get_proposal_expiry(env: Env) -> u64 {
+        proposal_expiry_secs(&env)
     }
 
     /// Called by the registered dispute contract to transition a job to the Disputed state
@@ -3196,9 +3226,7 @@ impl EscrowContract {
         if job.client != client {
             return Err(EscrowError::Unauthorized);
         }
-        if job.status == JobStatus::Disputed {
-            return Err(EscrowError::InvalidStatus);
-        }
+        require_state_not_disputed(&job)?;
 
         let mut milestones = job.milestones.clone();
         let milestone = milestones
@@ -3788,11 +3816,7 @@ impl EscrowContract {
             .get::<DataKey, RevisionProposal>(&DataKey::RevisionProposal(job_id))
         {
             if existing.status == ProposalStatus::Pending {
-                let expiry_secs: u64 = env
-                    .storage()
-                    .instance()
-                    .get(&DataKey::ProposalExpiry)
-                    .unwrap_or(DEFAULT_PROPOSAL_EXPIRY_SECS);
+                let expiry_secs = proposal_expiry_secs(&env);
                 let now = env.ledger().timestamp();
                 if now < existing.created_at + expiry_secs {
                     return Err(EscrowError::RevisionProposalAlreadyExists);
@@ -4313,11 +4337,7 @@ impl EscrowContract {
         }
 
         // Check if the proposal TTL has elapsed.
-        let expiry_secs: u64 = env
-            .storage()
-            .instance()
-            .get(&DataKey::ProposalExpiry)
-            .unwrap_or(DEFAULT_PROPOSAL_EXPIRY_SECS);
+        let expiry_secs = proposal_expiry_secs(&env);
         let now = env.ledger().timestamp();
         if now < proposal.created_at + expiry_secs {
             return Err(EscrowError::ProposalNotExpirable);

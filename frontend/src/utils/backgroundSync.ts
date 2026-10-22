@@ -1,6 +1,7 @@
 'use client';
 
 import { openDB, DBSchema, IDBPDatabase } from 'idb';
+import { SYNC_AUTH_REQUIRED_EVENT } from './syncEvents';
 
 interface PendingAction {
   id: string;
@@ -11,6 +12,8 @@ interface PendingAction {
   headers: Record<string, string>;
   timestamp: number;
   retries: number;
+  /** Set when a replay was refused with 401/403: kept until the user signs in again. */
+  authRequired?: boolean;
 }
 
 interface SyncDB extends DBSchema {
@@ -108,8 +111,25 @@ export async function updateActionRetry(id: string): Promise<void> {
   }
 }
 
+export async function markActionAuthRequired(id: string): Promise<void> {
+  const db = await getDB();
+  const action = await db.get(STORE_NAME, id);
+
+  if (action) {
+    action.authRequired = true;
+    await db.put(STORE_NAME, action);
+  }
+}
+
+/** Queued actions that are waiting for the user to sign in again. */
+export async function getAuthRequiredCount(): Promise<number> {
+  const actions = await getPendingActions();
+  return actions.filter((action) => action.authRequired).length;
+}
+
 export async function replayPendingActions(): Promise<void> {
   const actions = await getPendingActions();
+  let authRequired = 0;
 
   for (const action of actions) {
     try {
@@ -125,6 +145,13 @@ export async function replayPendingActions(): Promise<void> {
       if (response.ok) {
         // Success - remove from queue
         await removeAction(action.id);
+      } else if (response.status === 401 || response.status === 403) {
+        // The session most likely expired while offline. The request itself
+        // may be valid, so keep it and ask the user to sign in again rather
+        // than silently losing their message or application.
+        console.warn(`Action ${action.id} needs re-authentication:`, response.status);
+        await markActionAuthRequired(action.id);
+        authRequired += 1;
       } else if (response.status >= 400 && response.status < 500) {
         // Client error - don't retry, remove from queue
         console.error(`Action ${action.id} failed with client error:`, response.status);
@@ -137,6 +164,12 @@ export async function replayPendingActions(): Promise<void> {
       console.error(`Error replaying action ${action.id}:`, error);
       await updateActionRetry(action.id);
     }
+  }
+
+  if (authRequired > 0 && typeof window !== 'undefined') {
+    window.dispatchEvent(
+      new CustomEvent(SYNC_AUTH_REQUIRED_EVENT, { detail: { count: authRequired } })
+    );
   }
 }
 

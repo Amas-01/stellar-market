@@ -98,7 +98,7 @@ Replace placeholders like `<ESCROW_CONTRACT_ID>` before running.
 ### Escrow
 
 ```bash
-# create_job(client, freelancer, token, milestones, job_deadline, auto_refund_after)
+# create_job(client, freelancer, token, milestones, job_deadline, auto_refund_after, expiry_ledger)
 stellar contract invoke \
   --id <ESCROW_CONTRACT_ID> \
   --source-account "$SOURCE_ACCOUNT" \
@@ -110,7 +110,8 @@ stellar contract invoke \
   --token "$TOKEN_ADDRESS" \
   --milestones '[["Design",10000000,1735689600],["Build",20000000,1736294400]]' \
   --job_deadline 1736899200 \
-  --auto_refund_after 1737504000
+  --auto_refund_after 1737504000 \
+  --expiry_ledger 60000000  # ledger sequence at which the escrow expires; must be greater than the current ledger
 
 # get_job(job_id)
 stellar contract invoke \

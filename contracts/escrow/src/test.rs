@@ -8879,3 +8879,38 @@ fn test_bump_escrow_unknown_job_rejected() {
     let res = contract.try_bump_escrow(&999u64);
     assert_eq!(res, Err(Ok(EscrowError::JobNotFound)));
 }
+
+// ─── Public config getters: max milestones and proposal expiry ───────────────
+
+#[test]
+fn test_get_max_milestones_returns_contract_limit() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (contract, _client, _freelancer, _token, _admin) = setup_test(&env);
+
+    assert_eq!(contract.get_max_milestones(), MAX_MILESTONES);
+}
+
+#[test]
+fn test_get_proposal_expiry_returns_value_set_at_initialize() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let contract_id = env.register_contract(None, EscrowContract);
+    let client = EscrowContractClient::new(&env, &contract_id);
+    let admin = Address::generate(&env);
+    let treasury = Address::generate(&env);
+
+    client.initialize(&vec![&env, admin.clone()], &1, &treasury, &0, &86_400);
+
+    assert_eq!(client.get_proposal_expiry(), 86_400);
+}
+
+#[test]
+fn test_get_proposal_expiry_matches_default_when_configured_at_seven_days() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (contract, _client, _freelancer, _token, _admin) = setup_test(&env);
+
+    // setup_test initializes with 604800 seconds, which equals DEFAULT_PROPOSAL_EXPIRY_SECS.
+    assert_eq!(contract.get_proposal_expiry(), DEFAULT_PROPOSAL_EXPIRY_SECS);
+}

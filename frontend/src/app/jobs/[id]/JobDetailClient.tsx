@@ -22,7 +22,7 @@ import Link from "next/link";
 import axios from "axios";
 import { useWallet } from "@/context/WalletContext";
 import { useAuth } from "@/context/AuthContext";
-import { PAYMENT_TOKENS, TOKEN_EXCHANGE_RATES } from "@/constants/jobs";
+import { PAYMENT_TOKENS, checkTokenBalance, requiredTokenAmount } from "@/constants/jobs";
 import { useFocusTrap } from "@/hooks/useFocusTrap";
 import StatusBadge from "@/components/StatusBadge";
 import ApplyModal from "@/components/ApplyModal";
@@ -993,9 +993,15 @@ export default function JobDetailClient({
     [job],
   );
 
-  const selectedTokenAmount = fundingRequirement / TOKEN_EXCHANGE_RATES[selectedPaymentToken];
-  const hasSufficientSelectedTokenBalance =
-    selectedTokenBalance >= selectedTokenAmount;
+  const selectedTokenAmount = requiredTokenAmount(fundingRequirement, selectedPaymentToken);
+  const selectedTokenBalanceCheck = checkTokenBalance(
+    selectedTokenBalance,
+    fundingRequirement,
+    selectedPaymentToken,
+  );
+  // Only a known shortfall blocks funding. Without a rate (XLM today) the
+  // check cannot say either way, so the user is warned instead of blocked.
+  const hasSufficientSelectedTokenBalance = selectedTokenBalanceCheck !== "insufficient";
 
   if (loading) {
     return (
@@ -1561,7 +1567,7 @@ export default function JobDetailClient({
                       </div>
                       <div className="flex items-center gap-2 text-xs text-theme-text">
                         <span className="rounded-full border border-theme-border px-2 py-1">
-                          1 XLM ≈ 1 USDC
+                          No live XLM price yet
                         </span>
                       </div>
                     </div>
@@ -1589,16 +1595,25 @@ export default function JobDetailClient({
                           maximumFractionDigits: 2,
                         })} {selectedPaymentToken}
                       </span>
-                      <span className="rounded-full border border-theme-border px-2 py-1">
-                        Required: {selectedTokenAmount.toLocaleString(undefined, {
-                          maximumFractionDigits: 2,
-                        })} {selectedPaymentToken}
-                      </span>
+                      {selectedTokenAmount !== null && (
+                        <span className="rounded-full border border-theme-border px-2 py-1">
+                          Required: {selectedTokenAmount.toLocaleString(undefined, {
+                            maximumFractionDigits: 2,
+                          })} {selectedPaymentToken}
+                        </span>
+                      )}
                     </div>
 
-                    {!hasSufficientSelectedTokenBalance && (
+                    {selectedTokenBalanceCheck === "insufficient" && (
                       <p className="mt-2 text-xs text-theme-error">
                         Insufficient {selectedPaymentToken} balance for this escrow deposit.
+                      </p>
+                    )}
+                    {selectedTokenBalanceCheck === "unknown" && (
+                      <p className="mt-2 text-xs text-theme-text">
+                        We can&apos;t check your {selectedPaymentToken} balance against this
+                        budget yet, because there&apos;s no live {selectedPaymentToken} price.
+                        Make sure your wallet holds enough before funding.
                       </p>
                     )}
                   </div>

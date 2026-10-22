@@ -1554,6 +1554,38 @@ fn test_endorse_success() {
 }
 
 #[test]
+fn test_endorse_emits_event() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let reputation_id = env.register_contract(None, ReputationContract);
+    let client = ReputationContractClient::new(&env, &reputation_id);
+    let admin = Address::generate(&env);
+    client.initialize(&vec![&env, admin.clone()], &1u32, &0u32);
+
+    let endorser = Address::generate(&env);
+    let target = Address::generate(&env);
+    let skill = String::from_str(&env, "Rust");
+    client.endorse(&endorser, &target, &skill);
+
+    let mut found_event = false;
+    for event in env.events().all().iter() {
+        let (_, topics, data) = event;
+        if topics.len() != 2 {
+            continue;
+        }
+        let topic0 = Symbol::try_from_val(&env, &topics.get_unchecked(0)).ok();
+        let topic1 = Symbol::try_from_val(&env, &topics.get_unchecked(1)).ok();
+        if topic0 == Some(symbol_short!("reput")) && topic1 == Some(symbol_short!("endorsed")) {
+            found_event = true;
+            let event_data: (Address, Address, String) =
+                TryFromVal::try_from_val(&env, &data).unwrap();
+            assert_eq!(event_data, (endorser.clone(), target.clone(), skill.clone()));
+        }
+    }
+    assert!(found_event);
+}
+
+#[test]
 #[should_panic(expected = "Error(Contract, #23)")]
 fn test_endorse_duplicate_rejected() {
     let env = Env::default();
@@ -3545,7 +3577,7 @@ fn test_claim_stake_full_withdrawal() {
 }
 
 #[test]
-#[should_panic(expected = "Error(Contract, #11)")]
+#[should_panic(expected = "Error(Contract, #32)")]
 fn test_claim_stake_exceeds_balance() {
     let env = Env::default();
     env.mock_all_auths();
@@ -3577,12 +3609,12 @@ fn test_claim_stake_exceeds_balance() {
     env.ledger().with_mut(|l| l.timestamp = 1000 + STAKE_LOCKUP_SECONDS + 1);
 
     // Attempt to claim more than the available balance
-    // Should fail with BelowMinStake (#11)
+    // Should fail with InvalidClaimAmount (#32)
     reputation_client.claim_stake(&reviewer, &(MIN_STAKE + 1));
 }
 
 #[test]
-#[should_panic(expected = "Error(Contract, #11)")]
+#[should_panic(expected = "Error(Contract, #32)")]
 fn test_claim_stake_zero_amount() {
     let env = Env::default();
     env.mock_all_auths();
@@ -3614,12 +3646,12 @@ fn test_claim_stake_zero_amount() {
     env.ledger().with_mut(|l| l.timestamp = 1000 + STAKE_LOCKUP_SECONDS + 1);
 
     // Attempt to claim zero amount
-    // Should fail with BelowMinStake (#11)
+    // Should fail with InvalidClaimAmount (#32)
     reputation_client.claim_stake(&reviewer, &0);
 }
 
 #[test]
-#[should_panic(expected = "Error(Contract, #11)")]
+#[should_panic(expected = "Error(Contract, #32)")]
 fn test_claim_stake_negative_amount() {
     let env = Env::default();
     env.mock_all_auths();
@@ -3651,7 +3683,7 @@ fn test_claim_stake_negative_amount() {
     env.ledger().with_mut(|l| l.timestamp = 1000 + STAKE_LOCKUP_SECONDS + 1);
 
     // Attempt to claim negative amount
-    // Should fail with BelowMinStake (#11)
+    // Should fail with InvalidClaimAmount (#32)
     reputation_client.claim_stake(&reviewer, &-100);
 }
 

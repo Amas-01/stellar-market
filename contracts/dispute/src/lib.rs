@@ -53,18 +53,27 @@ pub enum DisputeError {
     InsufficientActiveArbitrators = 27,
     EvidenceCapReached = 28,
     DuplicateEvidence = 29,
+    InvalidVoteChoice = 30,
 }
 
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum DisputeStatus {
+    /// Dispute filed, awaiting arbitrator votes.
     Open,
+    /// Arbitrator voting is in progress.
     Voting,
+    /// Arbitrators ruled fully in the client's favor.
     ResolvedForClient,
+    /// Arbitrators ruled fully in the freelancer's favor.
     ResolvedForFreelancer,
+    /// Arbitrators ruled to split the escrowed funds evenly.
     RefundedBoth,
+    /// Partial refund to the client; payload is a 0-100 percentage of the escrow refunded.
     RefundSplit(u32),
+    /// Partial award to the freelancer; payload is in basis points out of 10,000.
     SplitAward(u32),
+    /// Dispute escalated to a higher arbitration tier.
     Escalated,
     /// Filing was determined to be in bad faith by a 4/5 supermajority of arbitrators.
     MaliciousDisputeFiling,
@@ -323,6 +332,10 @@ const DEFAULT_PARTY_COOLDOWN_SECS: u64 = 1_209_600; // 14 days
 
 /// Maximum number of jobs to look back for conflict detection to avoid instruction limits.
 const MAX_CONFLICT_LOOKBACK: u64 = 100;
+
+/// Knuth's multiplicative hash constant (0x9E3779B1), used to spread
+/// pseudo-random arbitrator indices across the pool in select_arbitrators.
+const ARBITRATOR_SELECTION_HASH_MULTIPLIER: u64 = 2_654_435_761;
 
 /// How long (in seconds) after dispute resolution an appeal may be filed.
 const APPEAL_WINDOW_SECS: u64 = 172_800; // 48 hours
@@ -601,6 +614,9 @@ mod escrow {
     }
 }
 
+/// Scans the given escrow contract (bounded) for addresses that overlap with
+/// `client` or `freelancer`, returning them as arbitrators to exclude from
+/// selection for this dispute.
 fn detect_conflicts(
     env: &Env,
     escrow_contract: &Address,
@@ -729,7 +745,7 @@ fn select_arbitrators(
     let max_attempts = count.saturating_mul(3); // Prevent infinite loops
     
     while selected.len() < count as u32 && attempts < max_attempts && selected.len() < eligible.len() as u32 {
-        let index = ((seed.wrapping_add(attempts as u64).wrapping_mul(2654435761)) % pool_size) as u32;
+        let index = ((seed.wrapping_add(attempts as u64).wrapping_mul(ARBITRATOR_SELECTION_HASH_MULTIPLIER)) % pool_size) as u32;
         let candidate = eligible.get(index).unwrap();
         
         if !selected.contains(&candidate) {
@@ -741,6 +757,10 @@ fn select_arbitrators(
     selected
 }
 
+/// Linearly scans the arbitrator pool for the first address that is not the
+/// client or freelancer, not already assigned to `dispute`, and not in its
+/// excluded-voters list, returning it as a replacement, or `None` if no
+/// eligible candidate remains.
 fn select_replacement_arbitrator(env: &Env, dispute: &Dispute) -> Option<Address> {
     let pool: Vec<Address> = env
         .storage()
@@ -916,7 +936,7 @@ impl DisputeContract {
     }
 
     /// Raise a dispute on a job. Either the client or freelancer can initiate.
-    /// Automatically selects 5 random arbitrators from the pool to vote on this dispute.
+    /// Automatically selects ARBITRATORS_PER_DISPUTE random arbitrators from the pool to vote on this dispute.
     #[allow(clippy::too_many_arguments)]
     pub fn raise_dispute(
         env: Env,
@@ -1333,6 +1353,14 @@ impl DisputeContract {
             // could expire from storage before that confirmation ever
             // happens (#1166).
             bump_exclusion_proposal_ttl(&env, dispute_id, &voter);
+
+            // Emit lightweight event for the first proposal so indexers/UIs
+            // know an exclusion is pending confirmation.
+            env.events().publish(
+                (symbol_short!("dispute"), symbol_short!("excl_prop")),
+                (dispute_id, voter, caller),
+            );
+
             return Ok(());
         }
         if proposer == Some(caller) {
@@ -1614,7 +1642,7 @@ impl DisputeContract {
                 ap.refund_split_sum = ap.refund_split_sum.saturating_add(pct as u64);
             }
             VoteChoice::MaliciousFiling | VoteChoice::SplitAward(_, _) => {
-                return Err(DisputeError::Unauthorized);
+                return Err(DisputeError::InvalidVoteChoice);
             }
         }
 

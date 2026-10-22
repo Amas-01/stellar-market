@@ -42,6 +42,14 @@ describe("job filter URL sync (#815)", () => {
     it("falls back to page 1 for a non-numeric page", () => {
       expect(parseFiltersFromParams(new URLSearchParams("page=abc")).page).toBe(1);
     });
+
+    it.each(["0", "-5"])("clamps page=%s to page 1 (#1617)", (page) => {
+      expect(parseFiltersFromParams(new URLSearchParams(`page=${page}`)).page).toBe(1);
+    });
+
+    it("keeps a valid positive page", () => {
+      expect(parseFiltersFromParams(new URLSearchParams("page=7")).page).toBe(7);
+    });
   });
 
   describe("filtersToParams", () => {
