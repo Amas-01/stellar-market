@@ -1353,6 +1353,14 @@ impl DisputeContract {
             // could expire from storage before that confirmation ever
             // happens (#1166).
             bump_exclusion_proposal_ttl(&env, dispute_id, &voter);
+
+            // Emit lightweight event for the first proposal so indexers/UIs
+            // know an exclusion is pending confirmation.
+            env.events().publish(
+                (symbol_short!("dispute"), symbol_short!("excl_prop")),
+                (dispute_id, voter, caller),
+            );
+
             return Ok(());
         }
         if proposer == Some(caller) {
