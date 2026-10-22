@@ -32,6 +32,7 @@ import {
   initiateEvidenceSessionSchema,
   evidenceSessionParamSchema,
   evidenceChunkParamSchema,
+  evidenceIdParamSchema,
 } from "../schemas/dispute";
 import {
   assembleAndVerify,
@@ -486,9 +487,31 @@ router.put(
  */
 router.get(
   "/:id/stats",
+  authenticate,
   validate({ params: disputeIdParamSchema }),
-  asyncHandler(async (req: Request, res: Response) => {
-    const stats = await DisputeService.getVoteStats(req.params.id as string);
+  asyncHandler(async (req: AuthRequest, res: Response) => {
+    const disputeId = req.params.id as string;
+    const dispute = await DisputeService.getDisputeById(disputeId);
+    
+    if (!dispute) {
+      res.status(404).json({ error: "Dispute not found" });
+      return;
+    }
+
+    const isParticipant =
+      dispute.clientId === req.userId ||
+      dispute.freelancerId === req.userId ||
+      dispute.initiatorId === req.userId;
+    const isAdmin = req.userRole === UserRole.ADMIN;
+
+    if (!isParticipant && !isAdmin) {
+      res.status(403).json({
+        error: "Access denied. Only dispute participants or admins can view vote statistics.",
+      });
+      return;
+    }
+
+    const stats = await DisputeService.getVoteStats(disputeId);
     res.json(stats);
   }),
 );
@@ -941,6 +964,17 @@ router.get(
   asyncHandler(async (req: AuthRequest, res: Response) => {
     const disputeId = req.params.id as string;
 
+    const access = await assertDisputeViewerAccess(
+      disputeId,
+      req.userId!,
+      req.userRole,
+    );
+
+    if (!access.allowed) {
+      res.status(access.status).json({ error: access.error });
+      return;
+    }
+
     const attachments = await prisma.attachment.findMany({
       where: { disputeId },
       include: {
@@ -979,6 +1013,7 @@ router.get(
 router.get(
   "/:id/evidence/:evidenceId/download",
   authenticate,
+  validate({ params: evidenceIdParamSchema }),
   asyncHandler(async (req: AuthRequest, res: Response) => {
     const attachment = await prisma.attachment.findFirst({
       where: {
@@ -1035,7 +1070,21 @@ router.get(
 router.get(
   "/:id/evidence/:evidenceId/verify",
   authenticate,
+  validate({ params: evidenceIdParamSchema }),
   asyncHandler(async (req: AuthRequest, res: Response) => {
+    const disputeId = req.params.id as string;
+
+    const access = await assertDisputeViewerAccess(
+      disputeId,
+      req.userId!,
+      req.userRole,
+    );
+
+    if (!access.allowed) {
+      res.status(access.status).json({ error: access.error });
+      return;
+    }
+
     const attachment = await prisma.attachment.findFirst({
       where: {
         id: req.params.evidenceId as string,
@@ -1119,6 +1168,19 @@ router.get(
 
     if (!dispute) {
       res.status(404).json({ error: "Dispute not found" });
+      return;
+    }
+
+    const isParticipant =
+      dispute.clientId === req.userId ||
+      dispute.freelancerId === req.userId ||
+      dispute.initiatorId === req.userId;
+    const isAdmin = req.userRole === UserRole.ADMIN;
+
+    if (!isParticipant && !isAdmin) {
+      res.status(403).json({
+        error: "Access denied. Only dispute participants or admins can view the tally.",
+      });
       return;
     }
 
