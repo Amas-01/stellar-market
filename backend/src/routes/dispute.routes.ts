@@ -1144,6 +1144,19 @@ router.get(
       return;
     }
 
+    const isParticipant =
+      dispute.clientId === req.userId ||
+      dispute.freelancerId === req.userId ||
+      dispute.initiatorId === req.userId;
+    const isAdmin = req.userRole === UserRole.ADMIN;
+
+    if (!isParticipant && !isAdmin) {
+      res.status(403).json({
+        error: "Access denied. Only dispute participants or admins can view the tally.",
+      });
+      return;
+    }
+
     const totalVotes = dispute.votes.length;
     const votesForClient = dispute.votes.filter(
       (v) => v.choice === "CLIENT",
