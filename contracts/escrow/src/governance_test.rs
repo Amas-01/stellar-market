@@ -345,6 +345,39 @@ fn cannot_vote_twice() {
 // ============================================================
 
 #[test]
+fn get_delegate_returns_delegated_address() {
+    let ctx = setup();
+    let delegator = voter_with(&ctx, 90, 500_000);
+    let first = voter_with(&ctx, 40, 500_000);
+    let second = voter_with(&ctx, 30, 500_000);
+
+    ctx.escrow.delegate(&delegator, &first);
+    assert_eq!(ctx.escrow.get_delegate(&delegator), Some(first.clone()));
+
+    // Re-delegating overwrites the stored delegate.
+    ctx.escrow.delegate(&delegator, &second);
+    assert_eq!(ctx.escrow.get_delegate(&delegator), Some(second));
+}
+
+#[test]
+fn get_delegate_returns_none_without_delegation() {
+    let ctx = setup();
+    let delegator = voter_with(&ctx, 90, 500_000);
+    let delegate = voter_with(&ctx, 40, 500_000);
+    let bystander = voter_with(&ctx, 20, 500_000);
+
+    // An account that never delegated has no delegate.
+    assert_eq!(ctx.escrow.get_delegate(&delegator), None);
+
+    ctx.escrow.delegate(&delegator, &delegate);
+
+    // Delegation is directional and per-account: neither the recipient nor an
+    // unrelated account gains a delegate.
+    assert_eq!(ctx.escrow.get_delegate(&delegate), None);
+    assert_eq!(ctx.escrow.get_delegate(&bystander), None);
+}
+
+#[test]
 fn delegated_weight_applies_to_delegate_side() {
     let ctx = setup();
     let delegate = voter_with(&ctx, 40, 500_000);
