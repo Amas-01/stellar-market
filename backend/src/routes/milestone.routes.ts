@@ -18,6 +18,8 @@ import {
   getMilestonesQuerySchema,
   getMilestoneByIdParamSchema,
   getJobByIdParamSchema,
+  deliverableParamSchema,
+  deliverableDeleteParamSchema,
 } from "../schemas";
 
 const router = Router();
@@ -425,12 +427,6 @@ router.put(
 );
 
 // ─── Deliverable attachments ──────────────────────────────────────────────────
-
-const deliverableParamSchema = z.object({ id: z.string() });
-const deliverableDeleteParamSchema = z.object({
-  id: z.string(),
-  attachmentId: z.string(),
-});
 
 /**
  * POST /api/milestones/:id/deliverables

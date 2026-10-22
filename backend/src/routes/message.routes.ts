@@ -217,6 +217,17 @@ router.get("/",
         prisma.message.count({ where }),
       ]);
 
+      // Mark messages from the participant as read (matches GET /:id)
+      await prisma.message.updateMany({
+        where: {
+          senderId: participantId,
+          receiverId: req.userId!,
+          jobId: jobId ? jobId : undefined,
+          read: false,
+        },
+        data: { read: true },
+      });
+
       const hasNext = skip + limit < total;
 
       res.json({

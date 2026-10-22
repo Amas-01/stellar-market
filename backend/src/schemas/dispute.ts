@@ -45,13 +45,25 @@ export const evidenceChunkParamSchema = z.object({
     .regex(/^\d+$/, { message: "Chunk index must be a non-negative integer" }),
 });
 
+export const evidenceIdParamSchema = z.object({
+  id: z.string().min(1, { message: "Dispute ID is required" }),
+  evidenceId: z.string().min(1, { message: "Evidence ID is required" }),
+});
+
 export const initRaiseDisputeSchema = z.object({
   jobId: z.string().min(1, { message: "Job ID is required" }),
   reason: z
     .string()
     .min(10, { message: "Reason must be at least 10 characters long" })
     .max(2000, { message: "Reason must not exceed 2000 characters" }),
-  minVotes: z.coerce.number().int().min(1).optional(),
+  minVotes: z.coerce
+    .number()
+    .int()
+    .min(1)
+    .max(5, {
+      message: "minVotes must not exceed the 5 arbitrators assigned per dispute",
+    })
+    .optional(),
 });
 
 export const confirmDisputeTransactionSchema = z.object({

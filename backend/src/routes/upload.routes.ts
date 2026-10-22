@@ -391,6 +391,7 @@ router.get(
 router.get(
   "/:id/verify",
   authenticate,
+  validate(getFileSchema),
   async (req: AuthRequest, res: Response) => {
     try {
       const attachment = await prisma.attachment.findUnique({
