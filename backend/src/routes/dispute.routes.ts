@@ -486,9 +486,31 @@ router.put(
  */
 router.get(
   "/:id/stats",
+  authenticate,
   validate({ params: disputeIdParamSchema }),
-  asyncHandler(async (req: Request, res: Response) => {
-    const stats = await DisputeService.getVoteStats(req.params.id as string);
+  asyncHandler(async (req: AuthRequest, res: Response) => {
+    const disputeId = req.params.id as string;
+    const dispute = await DisputeService.getDisputeById(disputeId);
+    
+    if (!dispute) {
+      res.status(404).json({ error: "Dispute not found" });
+      return;
+    }
+
+    const isParticipant =
+      dispute.clientId === req.userId ||
+      dispute.freelancerId === req.userId ||
+      dispute.initiatorId === req.userId;
+    const isAdmin = req.userRole === UserRole.ADMIN;
+
+    if (!isParticipant && !isAdmin) {
+      res.status(403).json({
+        error: "Access denied. Only dispute participants or admins can view vote statistics.",
+      });
+      return;
+    }
+
+    const stats = await DisputeService.getVoteStats(disputeId);
     res.json(stats);
   }),
 );
@@ -1119,6 +1141,19 @@ router.get(
 
     if (!dispute) {
       res.status(404).json({ error: "Dispute not found" });
+      return;
+    }
+
+    const isParticipant =
+      dispute.clientId === req.userId ||
+      dispute.freelancerId === req.userId ||
+      dispute.initiatorId === req.userId;
+    const isAdmin = req.userRole === UserRole.ADMIN;
+
+    if (!isParticipant && !isAdmin) {
+      res.status(403).json({
+        error: "Access denied. Only dispute participants or admins can view the tally.",
+      });
       return;
     }
 

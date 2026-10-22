@@ -17,6 +17,8 @@ import { formatFileSize } from "../utils/fileValidation";
 const router = Router();
 const prisma = new PrismaClient();
 
+class PortfolioLimitError extends Error {}
+
 const createPortfolioSchema = {
   body: z.object({
     title: z.string().min(1).max(100),
@@ -113,38 +115,41 @@ router.post(
 
       const { title, description } = req.body as { title: string; description?: string };
 
-      // Enforce max items limit
-      const count = await prisma.portfolioItem.count({
-        where: { userId: req.userId! },
-      });
-      if (count >= PORTFOLIO_MAX_ITEMS) {
-        fs.unlinkSync(req.file.path);
-        return res.status(400).json({
-          error: `Maximum of ${PORTFOLIO_MAX_ITEMS} portfolio items allowed`,
-        });
-      }
-
-      // Determine next display order
-      const maxOrder = await prisma.portfolioItem.findFirst({
-        where: { userId: req.userId! },
-        orderBy: { displayOrder: "desc" },
-        select: { displayOrder: true },
-      });
-      const displayOrder = maxOrder ? maxOrder.displayOrder + 1 : 0;
-
       const fileUrl = `/api/portfolio/files/${req.file.filename}`;
 
-      const item = await prisma.portfolioItem.create({
-        data: {
-          userId: req.userId!,
-          title,
-          description: description || null,
-          fileUrl,
-          fileName: req.file.originalname,
-          mimeType: req.file.mimetype,
-          size: req.file.size,
-          displayOrder,
-        },
+      // Count-check and create run in one transaction. Locking the user row
+      // serializes concurrent uploads from the same user, so the cap cannot
+      // be bypassed by parallel requests.
+      const item = await prisma.$transaction(async (tx) => {
+        await tx.$queryRaw`SELECT id FROM "User" WHERE id = ${req.userId!} FOR UPDATE`;
+
+        const count = await tx.portfolioItem.count({
+          where: { userId: req.userId! },
+        });
+        if (count >= PORTFOLIO_MAX_ITEMS) {
+          throw new PortfolioLimitError();
+        }
+
+        // Determine next display order
+        const maxOrder = await tx.portfolioItem.findFirst({
+          where: { userId: req.userId! },
+          orderBy: { displayOrder: "desc" },
+          select: { displayOrder: true },
+        });
+        const displayOrder = maxOrder ? maxOrder.displayOrder + 1 : 0;
+
+        return tx.portfolioItem.create({
+          data: {
+            userId: req.userId!,
+            title,
+            description: description || null,
+            fileUrl,
+            fileName: req.file!.originalname,
+            mimeType: req.file!.mimetype,
+            size: req.file!.size,
+            displayOrder,
+          },
+        });
       });
 
       res.status(201).json({
@@ -154,6 +159,11 @@ router.post(
     } catch (error) {
       if (req.file && fs.existsSync(req.file.path)) {
         fs.unlinkSync(req.file.path);
+      }
+      if (error instanceof PortfolioLimitError) {
+        return res.status(400).json({
+          error: `Maximum of ${PORTFOLIO_MAX_ITEMS} portfolio items allowed`,
+        });
       }
       if ((error as { code?: string })?.code === "LIMIT_FILE_SIZE") {
         return res.status(400).json({
@@ -189,7 +199,8 @@ router.put(
       }
 
       // Update display order for each item
-      await Promise.all(
+      // Applied atomically: all updates succeed or none do
+      await prisma.$transaction(
         ids.map((id, index) =>
           prisma.portfolioItem.update({
             where: { id },

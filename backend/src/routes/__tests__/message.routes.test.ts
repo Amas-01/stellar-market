@@ -181,6 +181,27 @@ describe("GET /api/messages", () => {
     expect(messageMock.count.mock.calls[0][0].where).toEqual(where);
   });
 
+  it("marks the participant's unread messages as read, like GET /:id", async () => {
+    messageMock.findMany.mockResolvedValueOnce([]);
+    messageMock.count.mockResolvedValueOnce(0);
+    messageMock.updateMany.mockResolvedValueOnce({ count: 2 });
+
+    const res = await request(app)
+      .get(`/api/messages?participantId=${USER_OTHER_ID}&jobId=job-123`)
+      .set(authHeader());
+
+    expect(res.status).toBe(200);
+    expect(messageMock.updateMany).toHaveBeenCalledWith({
+      where: {
+        senderId: USER_OTHER_ID,
+        receiverId: USER_TEST_ID,
+        jobId: "job-123",
+        read: false,
+      },
+      data: { read: true },
+    });
+  });
+
   it("filters conversation lists by sender and receiver", async () => {
     messageMock.findMany.mockResolvedValueOnce([]);
 

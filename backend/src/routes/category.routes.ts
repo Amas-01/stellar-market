@@ -84,7 +84,10 @@ router.get(
       return res.status(404).json({ error: "Category not found." });
     }
 
-    const cacheKey = `category:${slug}`;
+    // Use the canonical slug (not the raw request param) so every casing
+    // variant shares one cache entry and matches GET /categories.
+    const canonicalSlug = categoryToSlug(categoryName);
+    const cacheKey = `category:${canonicalSlug}`;
     const { data } = await cache(cacheKey, 300, async () => {
       const jobCount = await prisma.job.count({
         where: {
@@ -102,7 +105,7 @@ router.get(
 
       return {
         name: categoryName,
-        slug,
+        slug: canonicalSlug,
         icon: CATEGORY_ICONS[categoryName] ?? "Briefcase",
         description: CATEGORY_DESCRIPTIONS[categoryName] ?? "",
         jobCount,
