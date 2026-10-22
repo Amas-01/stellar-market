@@ -2740,6 +2740,58 @@ impl ReputationContract {
         Ok(())
     }
 
+    /// Get the configured stake tier schedule. Returns an empty vec if no tiers are set.
+    pub fn get_stake_tiers(env: Env) -> Vec<StakeTier> {
+        env.storage()
+            .instance()
+            .get(&DataKey::StakeTiers)
+            .unwrap_or(Vec::new(&env))
+    }
+
+    /// Check if a user is banned. Banned users are excluded from leaderboard results.
+    pub fn is_banned(env: Env, user: Address) -> bool {
+        env.storage()
+            .instance()
+            .get(&DataKey::BannedUser(user))
+            .unwrap_or(false)
+    }
+
+    /// Get the referral bonus history for a user. Returns an empty vec if no bonuses exist.
+    /// Mirrors the pattern of get_reviews for consistency across similar data structures.
+    pub fn get_referral_bonuses(env: Env, user: Address) -> Vec<ReferralBonusRecord> {
+        let bonuses_key = DataKey::ReferralBonusList(user);
+        let bonuses: Option<Vec<ReferralBonusRecord>> = env.storage().persistent().get(&bonuses_key);
+        match bonuses {
+            Some(list) => {
+                env.storage().persistent().extend_ttl(
+                    &bonuses_key,
+                    MIN_TTL_THRESHOLD,
+                    MIN_TTL_EXTEND_TO,
+                );
+                list
+            }
+            None => Vec::new(&env),
+        }
+    }
+
+    /// Get when a reviewer's staked tokens unlock. Returns the timestamp when the
+    /// stake lockup period ends, or 0 if no lockup is active (no stake or already expired).
+    /// Use this to show "stake unlocks in N days" in wallet/UI integrations.
+    pub fn get_stake_lockup_expiry(env: Env, user: Address) -> u64 {
+        let lockup_key = DataKey::StakeLockupTs(user);
+        let staked_at: u64 = env
+            .storage()
+            .persistent()
+            .get(&lockup_key)
+            .unwrap_or(0u64);
+
+        if staked_at == 0 {
+            return 0;
+        }
+
+        staked_at.saturating_add(STAKE_LOCKUP_SECONDS)
+    }
+
     pub fn get_review_appeal(
         env: Env,
         reviewer: Address,
