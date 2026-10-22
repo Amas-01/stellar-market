@@ -1013,6 +1013,7 @@ router.get(
 router.get(
   "/:id/evidence/:evidenceId/download",
   authenticate,
+  validate({ params: evidenceIdParamSchema }),
   asyncHandler(async (req: AuthRequest, res: Response) => {
     const attachment = await prisma.attachment.findFirst({
       where: {
